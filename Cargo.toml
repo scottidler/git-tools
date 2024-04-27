@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "clone",
+  "ls-github-repos",
+]
+
+resolver = "2"
