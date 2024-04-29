@@ -18,9 +18,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: linux
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            suffix: macos
+#          - os: macos-latest
+#            target: x86_64-apple-darwin
+#            suffix: macos
     steps:
       - uses: actions/checkout@v4
         with:
