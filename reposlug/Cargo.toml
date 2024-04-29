@@ -1,5 +1,5 @@
 [package]
-name = "git-tools"
+name = "reposlug"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,3 +8,7 @@ clap = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+git2 = "0.18.3"
+regex = "1.10.4"
+url = "2.5.0"
+

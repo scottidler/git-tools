@@ -1,5 +1,5 @@
 [package]
-name = "git-tools"
+name = "stale-branches"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,3 +8,7 @@ clap = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+
+chrono = "0.4.38"
+serde = { version = "1.0.199", features = ["derive"] }
+serde_yaml = "0.9.34"
