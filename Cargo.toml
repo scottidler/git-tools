@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "clone",
+  "clone", "filter-ref",
   "ls-github-repos", "reposlug", "stale-branches",
 ]
 
