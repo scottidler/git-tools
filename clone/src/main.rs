@@ -1,14 +1,10 @@
-#![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, unused_mut, dead_code))]
-
-#![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, unused_mut, dead_code))]
-
 // Standard library imports
 use std::path::{Path, PathBuf};
-use std::process::{Command as SysCommand, Stdio};
+use std::process::{Command as SysCommand};
 use std::env;
 
 // Third-party crate imports
-use clap::{Parser, Arg};
+use clap::Parser;
 use eyre::{Result, eyre, Context};
 use log::{info, debug, warn, error};
 use env_logger;
@@ -85,7 +81,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, verbose: bool) -> Result<bool> {
+fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
     let mut clone_command = SysCommand::new("git");
     clone_command.arg("clone");
     if let Some(ref mirror) = mirror_option {
@@ -103,7 +99,7 @@ fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirro
     Ok(clone_status.success())
 }
 
-fn fetch_revision_sha(remote_url: &str, repospec: &str, verbose: bool) -> Result<String> {
+fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Result<String> {
     let separator = if remote_url.starts_with("git@") { ":" } else { "/" };
     let repo_url = format!("{}{}{}", remote_url, separator, repospec);
 

@@ -1,14 +1,12 @@
-#![allow(unused_imports, unused_variables, dead_code)]
-
-use clap::{Parser, Arg};
+use clap::Parser;
 use env_logger;
-use eyre::{Result, eyre, Context};
-use log::{debug, error, info, warn};
-use serde::{Serialize, Deserialize};
+use eyre::{Result, Context};
+use log::debug;
+use serde::Serialize;
 use serde_yaml;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::process::{Command as SysCommand, Stdio};
+use std::process::{Command as SysCommand};
 use chrono::{Utc, NaiveDate}; // Correct usage of chrono
 
 #[derive(Parser, Debug)]
@@ -28,7 +26,7 @@ struct AuthorBranches {
 }
 
 fn main() -> Result<()> {
-    env_logger::init(); // Initialize the logger
+    env_logger::init();
     let args = Cli::parse();
 
     let branches = get_stale_branches(args.days, &args.ref_)?;
@@ -44,6 +42,7 @@ fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)
         .wrap_err("Failed to execute git command")?;
 
     let current_time = Utc::now().timestamp();
+    debug!("current_time: {}", current_time);
     let result = String::from_utf8(output.stdout)?;
 
     let branches: Vec<(String, i64, String)> = result.lines()

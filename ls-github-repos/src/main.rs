@@ -1,5 +1,3 @@
-#![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, unused_mut, dead_code))]
-
 use clap::{Parser, ValueEnum};
 use reqwest::{Client, header};
 use serde_json::Value;
@@ -8,7 +6,7 @@ use eyre::{Result, eyre};
 use std::{fs, fmt};
 use std::path::PathBuf;
 use shellexpand;
-use log::{debug, info, error};
+use log::debug;
 use env_logger;
 
 #[derive(Parser, Debug)]
@@ -73,7 +71,7 @@ async fn main() -> Result<()> {
 async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<String>> {
     let client = Client::new();
     let base_url = format!("https://api.github.com/{}/{}", repo_type, name);
-    let mut url = format!("{}/repos", base_url);
+    let url = format!("{}/repos", base_url);
     let mut headers = header::HeaderMap::new();
 
     debug!("Setting headers with token: '{}'", token);
