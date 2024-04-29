@@ -18,9 +18,6 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: linux
-#          - os: macos-latest
-#            target: x86_64-apple-darwin
-#            suffix: macos
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,14 +48,18 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binaries
         run: |
           mkdir -p artifacts/
-          cp target/${{ matrix.target }}/release/git-tools artifacts/
+          cp target/${{ matrix.target }}/release/filter-ref artifacts/
+          cp target/${{ matrix.target }}/release/clone artifacts/
+          cp target/${{ matrix.target }}/release/ls-github-repos artifacts/
+          cp target/${{ matrix.target }}/release/reposlug artifacts/
+          cp target/${{ matrix.target }}/release/stale-branches artifacts/
 
       - name: Archive artifacts
         run: |
-          tar -czvf git-tools-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz -C artifacts git-tools
+          tar -czvf git-tools-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz -C artifacts .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -81,3 +82,4 @@ jobs:
           files: 'artifacts/**'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
