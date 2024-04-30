@@ -1,12 +1,12 @@
 // Standard library imports
 use std::path::{Path, PathBuf};
-use std::process::{Command as SysCommand};
+use std::process::{Command as SysCommand, Stdio};
 use std::env;
 
 // Third-party crate imports
 use clap::Parser;
-use eyre::{Result, eyre, Context};
-use log::{info, debug, warn, error};
+use eyre::{Result, eyre, WrapErr};
+use log::{debug, warn, error};
 use env_logger;
 
 // Constants for remote URLs
@@ -74,21 +74,26 @@ fn main() -> Result<()> {
     env::set_current_dir(&full_clone_path)?;
     SysCommand::new("git")
         .args(["checkout", &revision])
+        .stdout(Stdio::null()) // Suppressing stdout output from the checkout command
         .status()
         .wrap_err("Failed to checkout the specified revision")?;
 
-    info!("Repository cloned and checked out successfully into {:?}", full_clone_path);
+    // Only output the repospec to stdout
+    println!("{}", cli.repospec);
+
     Ok(())
 }
 
 fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
     let mut clone_command = SysCommand::new("git");
-    clone_command.arg("clone");
+    clone_command.arg("clone")
+        .stdout(Stdio::null()) // Suppressing stdout output from the clone command
+        .arg(format!("{}/{}", remote_url, repospec))
+        .arg(full_clone_path);
+
     if let Some(ref mirror) = mirror_option {
         clone_command.arg(mirror);
     }
-    clone_command.arg(format!("{}/{}", remote_url, repospec));
-    clone_command.arg(full_clone_path);
 
     debug!("Executing: {:?}", clone_command);
 
@@ -105,9 +110,10 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
 
     let command_args = ["ls-remote", &repo_url, "HEAD"];
     debug!("Executing git command with args: {:?}", command_args);
-    
+
     let output = SysCommand::new("git")
         .args(&command_args)
+        .stdout(Stdio::null()) // Suppressing stdout output from the ls-remote command
         .output()
         .wrap_err("Failed to execute ls-remote")?;
 
