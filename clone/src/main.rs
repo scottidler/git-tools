@@ -9,7 +9,6 @@ use eyre::{Result, eyre, WrapErr};
 use log::{debug, warn, error};
 use env_logger;
 
-// Constants for remote URLs
 const REMOTE_URLS: [&str; 2] = [
     "ssh://git@github.com",
     "https://github.com",
@@ -41,10 +40,41 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    env_logger::init(); // Initialize the logger
+    env_logger::init();
 
     let cli = Cli::parse();
 
+    let full_clone_path = PathBuf::from(&cli.clonepath).join(&cli.repospec);
+
+    if full_clone_path.exists() && full_clone_path.read_dir()?.next().is_some() {
+        update_existing_repo(&full_clone_path, &cli.revision)?
+    } else {
+        clone_new_repo(&cli)?
+    }
+
+    println!("{}", cli.repospec);
+
+    Ok(())
+}
+
+fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
+    env::set_current_dir(full_clone_path)?;
+    SysCommand::new("git")
+        .args(["checkout", revision])
+        .stdout(Stdio::null()) // Suppressing stdout output from the checkout command
+        .status()
+        .wrap_err("Failed to checkout the specified revision")?;
+
+    SysCommand::new("git")
+        .args(["pull"])
+        .stdout(Stdio::null()) // Suppressing stdout output from the checkout command
+        .status()
+        .wrap_err("Failed to pull the latest changes")?;
+
+    Ok(())
+}
+
+fn clone_new_repo(cli: &Cli) -> Result<()> {
     let revision = if cli.versioning {
         fetch_revision_sha(&cli.remote, &cli.repospec, cli.verbose)?
     } else {
@@ -71,37 +101,13 @@ fn main() -> Result<()> {
         }
     }
 
-    env::set_current_dir(&full_clone_path)?;
     SysCommand::new("git")
         .args(["checkout", &revision])
         .stdout(Stdio::null()) // Suppressing stdout output from the checkout command
         .status()
         .wrap_err("Failed to checkout the specified revision")?;
 
-    // Only output the repospec to stdout
-    println!("{}", cli.repospec);
-
     Ok(())
-}
-
-fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
-    let mut clone_command = SysCommand::new("git");
-    clone_command.arg("clone")
-        .stdout(Stdio::null()) // Suppressing stdout output from the clone command
-        .arg(format!("{}/{}", remote_url, repospec))
-        .arg(full_clone_path);
-
-    if let Some(ref mirror) = mirror_option {
-        clone_command.arg(mirror);
-    }
-
-    debug!("Executing: {:?}", clone_command);
-
-    let clone_status = clone_command.status()?;
-    if !clone_status.success() {
-        error!("Cloning failed for {}: {}", repospec, clone_status);
-    }
-    Ok(clone_status.success())
 }
 
 fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Result<String> {
@@ -128,4 +134,24 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
         .map(|s| s.to_string())?;
 
     Ok(sha)
+}
+
+fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
+    let mut clone_command = SysCommand::new("git");
+    clone_command.arg("clone")
+        .stdout(Stdio::null()) // Suppressing stdout output from the clone command
+        .arg(format!("{}/{}", remote_url, repospec))
+        .arg(full_clone_path);
+
+    if let Some(ref mirror) = mirror_option {
+        clone_command.arg(mirror);
+    }
+
+    debug!("Executing: {:?}", clone_command);
+
+    let clone_status = clone_command.status()?;
+    if !clone_status.success() {
+        error!("Cloning failed for {}: {}", repospec, clone_status);
+    }
+    Ok(clone_status.success())
 }
