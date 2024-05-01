@@ -7,7 +7,7 @@ use serde_yaml;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::{Command as SysCommand};
-use chrono::{Utc, NaiveDate}; // Correct usage of chrono
+use chrono::{Utc, NaiveDate};
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
@@ -36,6 +36,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Cli::parse();
 
+    // Prune local cache to ensure we're working with updated remote state
+    SysCommand::new("git")
+        .args(["fetch", "--prune"])
+        .output()
+        .wrap_err("Failed to prune local cache of git branches")?;
+
     let branches = get_stale_branches(args.days, &args.ref_)?;
     generate_yaml(&branches)?;
 
@@ -57,7 +63,7 @@ fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 3 { return None; }
             let date_str = parts[0];
-            let branch = parts[1].to_string();
+            let branch = parts[1].trim_start_matches("origin/").to_string();
             let author = parts[2..].join(" ");
             let commit_time = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
                 .ok()?
