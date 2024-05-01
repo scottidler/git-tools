@@ -9,8 +9,15 @@ use std::io::{self, Write};
 use std::process::{Command as SysCommand};
 use chrono::{Utc, NaiveDate}; // Correct usage of chrono
 
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "stale-branches", about = "Generate a YAML report of stale branches.")]
+#[command(version = built_info::GIT_DESCRIBE)]
+#[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
+#[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(help = "Number of days to consider a branch stale.")]
     days: i64,

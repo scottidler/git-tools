@@ -14,8 +14,15 @@ const REMOTE_URLS: [&str; 2] = [
     "https://github.com",
 ];
 
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "git-clone", about = "Clones repositories with optional versioning and mirroring", version)]
+#[command(name = "clone", about = "Clones repositories with optional versioning and mirroring")]
+#[command(version = built_info::GIT_DESCRIBE)]
+#[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
+#[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(help = "repospec schema is remote?reponame", required = true)]
     repospec: String,

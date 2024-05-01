@@ -3,8 +3,15 @@ use git2::Repository;
 use eyre::{Result, eyre};
 use regex::Regex;
 
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
+}
+
 #[derive(Parser, Debug)]
-#[clap(author = "Your Name", version = "1.0", about = "The 'reposlug' tool.")]
+#[command(name = "reposlug", about = "get the reposlug from the remote origin url")]
+#[command(version = built_info::GIT_DESCRIBE)]
+#[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
+#[command(arg_required_else_help = true)]
 struct Args {
     #[clap(short, long)]
     verbose: bool,

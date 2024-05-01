@@ -7,10 +7,11 @@ fi
 
 CLONE=$(print -r -- =clone)
 
-function clone() {
-    if [[ "$@" == *"-h"* ]] || [[ "$@" == *"--help"* ]]; then
+clone() {
+    if [[ "$1" == (-h|--help|-v|--version) ]]; then
         eval $CLONE "$@"
     else
-        cd $($CLONE $1)
+        cd $($CLONE "$1") || return
     fi
 }
+
