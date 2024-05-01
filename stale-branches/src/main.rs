@@ -36,9 +36,8 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Cli::parse();
 
-    // Prune local cache to ensure we're working with updated remote state
     SysCommand::new("git")
-        .args(["fetch", "--prune"])
+        .args(["fetch", "origin", "--prune"])
         .output()
         .wrap_err("Failed to prune local cache of git branches")?;
 
