@@ -1,13 +1,14 @@
-// Standard library imports
+// clone
+
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command as SysCommand, Stdio};
-use std::env;
 
-// Third-party crate imports
 use clap::Parser;
 use eyre::{Result, eyre, WrapErr};
 use log::{debug, warn, error};
 use env_logger;
+use ini::ini;
 
 const REMOTE_URLS: [&str; 2] = [
     "ssh://git@github.com",
@@ -100,11 +101,23 @@ fn clone_new_repo(cli: &Cli) -> Result<()> {
         format!("--reference {}/{}.git", mirror, cli.repospec)
     );
 
-    if !attempt_clone(&cli.repospec, &full_clone_path, &cli.remote, &mirror_option, cli.verbose)? {
-        warn!("SSH failed, trying HTTPS...");
-        if !attempt_clone(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &mirror_option, cli.verbose)? {
-            error!("Failed to clone repository using all configured remotes.");
-            return Err(eyre!("Failed to clone repository using all configured remotes."));
+    let ssh_key = find_ssh_key_for_project(&cli.repospec)?;
+    if let Some(key) = ssh_key {
+        let ssh_command = format!("GIT_SSH_COMMAND='/usr/bin/ssh -i {}' git", key);
+        if !attempt_clone(&cli.repospec, &full_clone_path, &cli.remote, &mirror_option, &ssh_command, cli.verbose)? {
+            warn!("SSH failed, trying HTTPS...");
+            if !attempt_clone(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &mirror_option, &ssh_command, cli.verbose)? {
+                error!("Failed to clone repository using all configured remotes.");
+                return Err(eyre!("Failed to clone repository using all configured remotes."));
+            }
+        }
+    } else {
+        if !attempt_clone(&cli.repospec, &full_clone_path, &cli.remote, &mirror_option, "git", cli.verbose)? {
+            warn!("SSH failed, trying HTTPS...");
+            if !attempt_clone(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &mirror_option, "git", cli.verbose)? {
+                error!("Failed to clone repository using all configured remotes.");
+                return Err(eyre!("Failed to clone repository using all configured remotes."));
+            }
         }
     }
 
@@ -143,12 +156,17 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
     Ok(sha)
 }
 
-fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
-    let mut clone_command = SysCommand::new("git");
-    clone_command.arg("clone")
-        .stdout(Stdio::null()) // Suppressing stdout output from the clone command
-        .arg(format!("{}/{}", remote_url, repospec))
-        .arg(full_clone_path);
+fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, ssh_command: &str, _verbose: bool) -> Result<bool> {
+    let mut clone_command = SysCommand::new("sh");
+    clone_command.arg("-c")
+        .arg(format!(
+            "{} clone {} {} {}",
+            ssh_command,
+            remote_url,
+            repospec,
+            full_clone_path.to_string_lossy()
+        ))
+        .stdout(Stdio::null()); // Suppressing stdout output from the clone command
 
     if let Some(ref mirror) = mirror_option {
         clone_command.arg(mirror);
@@ -161,4 +179,29 @@ fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirro
         error!("Cloning failed for {}: {}", repospec, clone_status);
     }
     Ok(clone_status.success())
+}
+
+fn find_ssh_key_for_project(repospec: &str) -> Result<Option<String>> {
+    let config_path = env::var("CLONE_CFG")
+        .unwrap_or_else(|_| format!("{}/.config/clone/clone.cfg", env::var("HOME").unwrap()));
+
+    if !Path::new(&config_path).exists() {
+        warn!("Configuration file not found: {:?}", config_path);
+        return Ok(None);
+    }
+
+    let conf = ini!(&config_path);
+    if conf.is_empty() {
+        return Err(eyre!("Failed to load configuration file"));
+    }
+
+    let project_name = repospec.split('/').next().ok_or_else(|| eyre!("Invalid repospec format"))?;
+    let ssh_key_map = conf.get("project-ssh-key-map")
+        .ok_or_else(|| eyre!("Configuration section not found"))?;
+
+    let ssh_key = ssh_key_map.get(project_name)
+        .or_else(|| ssh_key_map.get("default"))
+        .and_then(|s| s.clone());
+
+    Ok(ssh_key)
 }
