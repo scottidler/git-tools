@@ -66,7 +66,8 @@ fn main() -> Result<()> {
 }
 
 fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
-    env::set_current_dir(full_clone_path)?;
+    env::set_current_dir(full_clone_path)
+        .wrap_err("Failed to set current directory")?;
     Command::new("git")
         .args(["checkout", revision])
         .stdout(Stdio::null())
@@ -144,7 +145,7 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
 
     debug!("ls-remote output: {:?}", String::from_utf8_lossy(&output.stdout));
 
-    let output_str = String::from_utf8(output.stdout)?;
+    let output_str = String::from_utf8(output.stdout).wrap_err("Failed to parse ls-remote output")?;
     let sha = output_str.lines()
         .filter(|line| line.contains("HEAD"))
         .filter_map(|line| line.split_whitespace().next())
@@ -169,7 +170,7 @@ fn attempt_clone_with_ssh(repospec: &str, full_clone_path: &Path, remote_url: &s
 
     debug!("Executing: {:?}", clone_command);
 
-    let clone_status = clone_command.status()?;
+    let clone_status = clone_command.status().wrap_err("Failed to execute git clone with SSH")?;
     if !clone_status.success() {
         error!("Cloning failed for {}: {}", repospec, clone_status);
     }
@@ -189,7 +190,7 @@ fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirro
 
     debug!("Executing: {:?}", clone_command);
 
-    let clone_status = clone_command.status()?;
+    let clone_status = clone_command.status().wrap_err("Failed to execute git clone")?;
     if !clone_status.success() {
         error!("Cloning failed for {}: {}", repospec, clone_status);
     }
@@ -197,8 +198,9 @@ fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirro
 }
 
 fn find_ssh_key_for_org(repospec: &str) -> Result<Option<String>> {
+    let home_dir = env::var("HOME").wrap_err("Failed to get HOME environment variable")?;
     let config_path = env::var("CLONE_CFG")
-        .unwrap_or_else(|_| format!("{}/.config/clone/clone.cfg", env::var("HOME").unwrap()));
+        .unwrap_or_else(|_| format!("{}/.config/clone/clone.cfg", home_dir));
 
     if !Path::new(&config_path).exists() {
         warn!("Configuration file not found: {:?}", config_path);
@@ -215,8 +217,7 @@ fn find_ssh_key_for_org(repospec: &str) -> Result<Option<String>> {
     let ssh_key_map = cfg.get(&section_key).or_else(|| cfg.get("org.default"))
         .ok_or_else(|| eyre!("Configuration section not found"))?;
 
-    let ssh_key = ssh_key_map.get("sshkey")
-        .and_then(|s| s.clone());
+    let ssh_key = ssh_key_map.get("sshkey").cloned().flatten();
 
     Ok(ssh_key)
 }
