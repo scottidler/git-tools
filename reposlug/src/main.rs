@@ -11,12 +11,11 @@ mod built_info {
 #[command(name = "reposlug", about = "get the reposlug from the remote origin url")]
 #[command(version = built_info::GIT_DESCRIBE)]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
-#[command(arg_required_else_help = true)]
 struct Args {
     #[clap(short, long)]
     verbose: bool,
-    #[clap(value_parser, default_value_t = String::from("."))]
-    directory: String,
+    #[clap(value_parser, help = "[default: .]")]
+    directory: Option<String>, // Make this optional
 }
 
 fn main() -> Result<()> {
@@ -25,12 +24,15 @@ fn main() -> Result<()> {
     // Setup logging
     env_logger::init();
 
+    // Use the provided directory or default to "."
+    let directory = args.directory.unwrap_or_else(|| String::from("."));
+
     if args.verbose {
-        println!("Using directory: {}", args.directory);
+        println!("Using directory: {}", directory);
     }
 
     // Open the repository from the specified directory
-    let repo = Repository::discover(&args.directory)?;
+    let repo = Repository::discover(&directory)?;
     let remote = repo.find_remote("origin")?;
     let remote_url = remote.url().ok_or_else(|| eyre!("Remote 'origin' URL not found"))?;
 
