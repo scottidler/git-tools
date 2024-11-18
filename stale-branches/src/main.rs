@@ -82,24 +82,20 @@ fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)
 }
 
 fn generate_yaml(branches: &[(String, i64, String)]) -> Result<()> {
-    let mut authors_dict: HashMap<String, Vec<HashMap<String, i64>>> = HashMap::new();
+    let mut authors_dict: HashMap<String, AuthorBranches> = HashMap::new();
 
     for (branch, days, author) in branches {
         authors_dict
             .entry(author.clone())
-            .or_insert_with(Vec::new)
+            .or_insert_with(|| AuthorBranches { branches: vec![], count: 0 })
+            .branches
             .push(HashMap::from([(branch.clone(), *days)]));
+        authors_dict.get_mut(author).unwrap().count += 1;
     }
 
-    let authors: Vec<_> = authors_dict.into_iter().map(|(author, branches)| {
-        let count = branches.len();
-        let mut branches_vec = branches.iter().cloned().collect::<Vec<_>>();
-        branches_vec.sort_by_key(|b| -(b.iter().next().unwrap().1));
-        (author, AuthorBranches { branches: branches_vec, count })
-    }).collect();
-
-    let yaml_data = serde_yaml::to_string(&authors).wrap_err("Failed to serialize data to YAML")?;
+    let yaml_data = serde_yaml::to_string(&authors_dict).wrap_err("Failed to serialize data to YAML")?;
     io::stdout().write_all(yaml_data.as_bytes()).wrap_err("Failed to write YAML to stdout")?;
 
     Ok(())
 }
+
