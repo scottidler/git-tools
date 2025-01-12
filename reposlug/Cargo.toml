@@ -1,6 +1,6 @@
 [package]
 name = "reposlug"
-version = "0.1.0"
+version = "0.1.12"
 edition = "2021"
 build = "../build.rs"
 
@@ -10,6 +10,6 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 git2 = "0.18.3"
-regex = "1.10.4"
-url = "2.5.0"
+regex = "1.11.1"
+url = "2.5.4"
 

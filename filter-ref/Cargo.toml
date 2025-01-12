@@ -1,6 +1,6 @@
 [package]
 name = "filter-ref"
-version = "0.1.0"
+version = "0.1.12"
 edition = "2021"
 build = "../build.rs"
 
@@ -10,5 +10,5 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 git2 = "0.18.3"
-chrono = "0.4.38"
+chrono = "0.4.39"
 

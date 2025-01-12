@@ -1,6 +1,6 @@
 [package]
 name = "ls-github-repos"
-version = "0.1.0"
+version = "0.1.12"
 edition = "2021"
 build = "../build.rs"
 
@@ -10,7 +10,7 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
-reqwest = { version = "0.12.4", features = ["json"] }
-serde_json = "1.0.116"
+reqwest = { version = "0.12.12", features = ["json"] }
+serde_json = "1.0.135"
 shellexpand = "3.1.0"
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.43.0", features = ["full"] }
