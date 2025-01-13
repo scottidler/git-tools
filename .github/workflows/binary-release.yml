@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 env:
-  RUST_VERSION: 1.76.0
+  RUST_VERSION: 1.83.0
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -44,18 +44,15 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           rustup target add ${{ matrix.target }}
 
-      - name: Build for ${{ matrix.target }}
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binaries
+      - name: Build and package all subprojects
         run: |
           mkdir -p artifacts/
-          cp target/${{ matrix.target }}/release/filter-ref artifacts/
-          cp target/${{ matrix.target }}/release/clone artifacts/
-          cp target/${{ matrix.target }}/release/ls-github-repos artifacts/
-          cp target/${{ matrix.target }}/release/reposlug artifacts/
-          cp target/${{ matrix.target }}/release/stale-branches artifacts/
+          for project in clone filter-ref ls-github-repos reposlug stale-branches; do
+            echo "Building $project..."
+            cargo build --release --manifest-path "$project/Cargo.toml" --target ${{ matrix.target }}
+            cp target/${{ matrix.target }}/release/$project artifacts/
+          done
+          # Include shell-functions.sh in the artifacts
           cp shell-functions.sh artifacts/
 
       - name: Archive artifacts
@@ -83,4 +80,3 @@ jobs:
           files: 'artifacts/**'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
