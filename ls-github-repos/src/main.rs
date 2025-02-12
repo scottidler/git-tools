@@ -20,29 +20,32 @@ mod built_info {
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 struct Cli {
-    /// Supply the GitHub organization or user name
     #[clap(value_parser)]
     name: String,
 
-    /// Path to the directory containing the GitHub tokens
     #[clap(short, long, default_value = "~/.config/github/tokens")]
     token_path: String,
 
-    /// The type of repository owner, either 'user' or 'org'
     #[clap(short, long, value_enum, default_value = "org")]
     repo_type: RepoType,
 
-    /// Include archived repositories
     #[clap(short, long, action = clap::ArgAction::SetTrue)]
     archived: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum RepoType {
-    /// User type repository
     User,
-    /// Organization type repository
     Org,
+}
+
+impl RepoType {
+    fn repo_url(&self, name: &str) -> String {
+        match self {
+            RepoType::User => format!("https://api.github.com/users/{}/repos", name),
+            RepoType::Org => format!("https://api.github.com/orgs/{}/repos", name),
+        }
+    }
 }
 
 impl fmt::Display for RepoType {
@@ -69,27 +72,59 @@ async fn main() -> Result<()> {
 
     debug!("Trimmed token: '{}'", token);
 
-    let repo_names = ls_github_repos(args.repo_type, &args.name, args.archived, &token).await?;
+    let repo_type = determine_repo_type(&args.name, &token).await?;
+    let repo_names = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
     for repo_name in repo_names {
         println!("{}", repo_name);
     }
     Ok(())
 }
 
-async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<String>> {
+async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
     let client = Client::new();
-    let base_url = format!("https://api.github.com/{}/{}", repo_type, name);
-    let url = format!("{}/repos", base_url);
     let mut headers = header::HeaderMap::new();
 
-    debug!("Setting headers with token: '{}'", token);
     let auth_value = format!("token {}", token);
     headers.insert("Authorization", header::HeaderValue::from_str(&auth_value)
         .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?);
     headers.insert("User-Agent", header::HeaderValue::from_static("reqwest"));
-    headers.insert("Accept", header::HeaderValue::from_static("application/vnd.github.v3+json"));
 
-    debug!("Headers set successfully: {:?}", headers);
+    let user_url = format!("https://api.github.com/users/{}", name);
+
+    let user_response = client.get(&user_url).headers(headers.clone()).send().await?;
+    if user_response.status().is_success() {
+        let user_data: Value = user_response.json().await?;
+        if let Some(user_type) = user_data["type"].as_str() {
+            debug!("GitHub API response for '{}': {:?}", name, user_data);
+            match user_type {
+                "User" => {
+                    debug!("'{}' is identified as a User", name);
+                    return Ok(RepoType::User);
+                }
+                "Organization" => {
+                    debug!("'{}' is identified as an Organization", name);
+                    return Ok(RepoType::Org);
+                }
+                _ => {
+                    debug!("Unknown type for '{}': {}", name, user_type);
+                }
+            }
+        }
+    }
+
+    Err(eyre!("'{}' is neither a valid GitHub user nor organization, or your token lacks access.", name))
+}
+
+async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<String>> {
+    let client = Client::new();
+    let url = repo_type.repo_url(name);
+    let mut headers = header::HeaderMap::new();
+    let auth_value = format!("token {}", token);
+
+    headers.insert("Authorization", header::HeaderValue::from_str(&auth_value)
+        .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?);
+    headers.insert("User-Agent", header::HeaderValue::from_static("reqwest"));
+    headers.insert("Accept", header::HeaderValue::from_static("application/vnd.github.v3+json"));
 
     let mut repo_names = Vec::new();
     let mut page = 1;
@@ -99,15 +134,23 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
             .headers(headers.clone())
             .query(&[("page", page.to_string()), ("per_page", "100".to_string())])
             .send()
-            .await?
-            .json::<Vec<Value>>()
             .await?;
 
-        if response.is_empty() {
+        let status = response.status();
+        let response_text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(eyre!("GitHub API error ({}): {}", status, response_text));
+        }
+
+        let response_json: Vec<Value> = serde_json::from_str(&response_text)
+            .map_err(|e| eyre!("Error decoding response body: {}\nRaw response: {}", e, response_text))?;
+
+        if response_json.is_empty() {
             break;
         }
 
-        for repo in response {
+        for repo in response_json {
             if archived || !repo["archived"].as_bool().unwrap_or(false) {
                 if let Some(repo_name) = repo["full_name"].as_str() {
                     repo_names.push(repo_name.to_owned());
