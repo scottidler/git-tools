@@ -2,6 +2,7 @@
 members = [
   "clone",
   "filter-ref",
+  "ls-git-repos",
   "ls-github-repos",
   "reposlug",
   "stale-branches",
