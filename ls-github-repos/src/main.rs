@@ -29,8 +29,11 @@ struct Cli {
     #[clap(short, long, value_enum, default_value = "org")]
     repo_type: RepoType,
 
-    #[clap(short, long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'A', long, action = clap::ArgAction::SetTrue)]
     archived: bool,
+
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    age: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -73,9 +76,14 @@ async fn main() -> Result<()> {
     debug!("Trimmed token: '{}'", token);
 
     let repo_type = determine_repo_type(&args.name, &token).await?;
-    let repo_names = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
-    for repo_name in repo_names {
-        println!("{}", repo_name);
+    let repo_data = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
+
+    for (repo_name, created_at) in repo_data {
+        if args.age {
+            println!("{} {}", created_at, repo_name);
+        } else {
+            println!("{}", repo_name);
+        }
     }
     Ok(())
 }
@@ -115,7 +123,7 @@ async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
     Err(eyre!("'{}' is neither a valid GitHub user nor organization, or your token lacks access.", name))
 }
 
-async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<String>> {
+async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<(String, String)>> {
     let client = Client::new();
     let url = repo_type.repo_url(name);
     let mut headers = header::HeaderMap::new();
@@ -126,7 +134,7 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
     headers.insert("User-Agent", header::HeaderValue::from_static("reqwest"));
     headers.insert("Accept", header::HeaderValue::from_static("application/vnd.github.v3+json"));
 
-    let mut repo_names = Vec::new();
+    let mut repo_data = Vec::new();
     let mut page = 1;
 
     loop {
@@ -152,14 +160,15 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
 
         for repo in response_json {
             if archived || !repo["archived"].as_bool().unwrap_or(false) {
-                if let Some(repo_name) = repo["full_name"].as_str() {
-                    repo_names.push(repo_name.to_owned());
+                if let (Some(repo_name), Some(created_at)) = (repo["full_name"].as_str(), repo["created_at"].as_str()) {
+                    let date = created_at[..10].to_string();
+                    repo_data.push((repo_name.to_owned(), date));
                 }
             }
         }
         page += 1;
     }
 
-    repo_names.sort_unstable();
-    Ok(repo_names)
+    repo_data.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(repo_data)
 }
