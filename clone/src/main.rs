@@ -103,6 +103,7 @@ fn clone_new_repo(cli: &Cli) -> Result<()> {
         PathBuf::from(&cli.clonepath).join(&cli.repospec)
     };
 
+    // Perform the clone (with SSH fallback)
     if let Some(key) = find_ssh_key_for_org(&cli.repospec)? {
         if !attempt_clone_with_ssh(&cli.repospec, &full_clone_path, &cli.remote, &cli.mirrorpath, &key, cli.verbose)? {
             attempt_clone_with_ssh(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &cli.mirrorpath, &key, cli.verbose)?;
@@ -113,8 +114,14 @@ fn clone_new_repo(cli: &Cli) -> Result<()> {
         }
     }
 
+    // Change into the new repository directory
+    std::env::set_current_dir(&full_clone_path)
+        .wrap_err("Failed to change directory into cloned repo")?;
+
+    // Checkout requested revision and clean workspace
     git(&["checkout", &revision], None)?;
     git(&["clean", "-xfd"], None)?;
+
     Ok(())
 }
 
