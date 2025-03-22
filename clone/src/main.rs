@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use clap::Parser;
 use eyre::{Result, eyre, WrapErr};
-use log::{debug, warn, error};
+use log::{debug, warn};
 use env_logger;
 use ini::ini;
 
@@ -65,21 +65,28 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Run `git <args…>`, silencing output, with optional environment overrides.
+fn git(args: &[&str], envs: Option<&[(&str, &str)]>) -> Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args)
+       .stdout(std::process::Stdio::null())
+       .stderr(std::process::Stdio::null());
+    if let Some(env_pairs) = envs {
+        for (k, v) in env_pairs {
+            cmd.env(k, v);
+        }
+    }
+    let status = cmd.status().wrap_err_with(|| format!("git {:?} failed", args))?;
+    if status.success() { Ok(()) } else { Err(eyre!("git {:?} exited {}", args, status)) }
+}
+
 fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
-    env::set_current_dir(full_clone_path)
+    std::env::set_current_dir(full_clone_path)
         .wrap_err("Failed to set current directory")?;
-    Command::new("git")
-        .args(["checkout", revision])
-        .stdout(Stdio::null())
-        .status()
-        .wrap_err("Failed to checkout the specified revision")?;
 
-    Command::new("git")
-        .args(["pull"])
-        .stdout(Stdio::null())
-        .status()
-        .wrap_err("Failed to pull the latest changes")?;
-
+    git(&["checkout", revision], None)?;
+    git(&["pull"], None)?;
+    git(&["clean", "-xfd"], None)?;
     Ok(())
 }
 
@@ -96,37 +103,18 @@ fn clone_new_repo(cli: &Cli) -> Result<()> {
         PathBuf::from(&cli.clonepath).join(&cli.repospec)
     };
 
-    debug!("Attempting to clone into {:?}", full_clone_path);
-
-    let mirror_option = cli.mirrorpath.as_ref().map(|mirror|
-        format!("--reference {}/{}.git", mirror, cli.repospec)
-    );
-
-    let ssh_key = find_ssh_key_for_org(&cli.repospec)?;
-    if let Some(key) = ssh_key {
-        if !attempt_clone_with_ssh(&cli.repospec, &full_clone_path, &cli.remote, &mirror_option, &key, cli.verbose)? {
-            warn!("SSH failed, trying HTTPS...");
-            if !attempt_clone_with_ssh(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &mirror_option, &key, cli.verbose)? {
-                error!("Failed to clone repository using all configured remotes.");
-                return Err(eyre!("Failed to clone repository using all configured remotes."));
-            }
+    if let Some(key) = find_ssh_key_for_org(&cli.repospec)? {
+        if !attempt_clone_with_ssh(&cli.repospec, &full_clone_path, &cli.remote, &cli.mirrorpath, &key, cli.verbose)? {
+            attempt_clone_with_ssh(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &cli.mirrorpath, &key, cli.verbose)?;
         }
     } else {
-        if !attempt_clone(&cli.repospec, &full_clone_path, &cli.remote, &mirror_option, cli.verbose)? {
-            warn!("SSH failed, trying HTTPS...");
-            if !attempt_clone(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &mirror_option, cli.verbose)? {
-                error!("Failed to clone repository using all configured remotes.");
-                return Err(eyre!("Failed to clone repository using all configured remotes."));
-            }
+        if !attempt_clone(&cli.repospec, &full_clone_path, &cli.remote, &cli.mirrorpath, cli.verbose)? {
+            attempt_clone(&cli.repospec, &full_clone_path, REMOTE_URLS[1], &cli.mirrorpath, cli.verbose)?;
         }
     }
 
-    Command::new("git")
-        .args(["checkout", &revision])
-        .stdout(Stdio::null())
-        .status()
-        .wrap_err("Failed to checkout the specified revision")?;
-
+    git(&["checkout", &revision], None)?;
+    git(&["clean", "-xfd"], None)?;
     Ok(())
 }
 
@@ -156,45 +144,49 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
     Ok(sha)
 }
 
-fn attempt_clone_with_ssh(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, ssh_key: &str, _verbose: bool) -> Result<bool> {
-    let mut clone_command = Command::new("git");
-    clone_command.arg("clone")
-        .arg(format!("{}/{}", remote_url, repospec))
-        .arg(full_clone_path)
-        .env("GIT_SSH_COMMAND", format!("/usr/bin/ssh -i {}", ssh_key))
-        .stdout(Stdio::null());
-
-    if let Some(ref mirror) = mirror_option {
-        clone_command.arg(mirror);
+fn attempt_clone_with_ssh(
+    repospec: &str,
+    full_clone_path: &Path,
+    remote_url: &str,
+    mirror_option: &Option<String>,
+    ssh_key: &str,
+    _verbose: bool,
+) -> Result<bool> {
+    let mut args: Vec<String> = vec![
+        "clone".into(),
+        format!("{}/{}", remote_url, repospec),
+        full_clone_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(mirror) = mirror_option {
+        args.push("--reference".into());
+        args.push(format!("{}/{}.git", mirror, repospec));
     }
 
-    debug!("Executing: {:?}", clone_command);
-
-    let clone_status = clone_command.status().wrap_err("Failed to execute git clone with SSH")?;
-    if !clone_status.success() {
-        error!("Cloning failed for {}: {}", repospec, clone_status);
-    }
-    Ok(clone_status.success())
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(&arg_refs, Some(&[("GIT_SSH_COMMAND", &format!("/usr/bin/ssh -i {}", ssh_key))]))
+        .map(|_| true)
+        .or(Ok(false))
 }
 
-fn attempt_clone(repospec: &str, full_clone_path: &Path, remote_url: &str, mirror_option: &Option<String>, _verbose: bool) -> Result<bool> {
-    let mut clone_command = Command::new("git");
-    clone_command.arg("clone")
-        .arg(format!("{}/{}", remote_url, repospec))
-        .arg(full_clone_path)
-        .stdout(Stdio::null());
-
-    if let Some(ref mirror) = mirror_option {
-        clone_command.arg(mirror);
+fn attempt_clone(
+    repospec: &str,
+    full_clone_path: &Path,
+    remote_url: &str,
+    mirror_option: &Option<String>,
+    _verbose: bool,
+) -> Result<bool> {
+    let mut args: Vec<String> = vec![
+        "clone".into(),
+        format!("{}/{}", remote_url, repospec),
+        full_clone_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(mirror) = mirror_option {
+        args.push("--reference".into());
+        args.push(format!("{}/{}.git", mirror, repospec));
     }
 
-    debug!("Executing: {:?}", clone_command);
-
-    let clone_status = clone_command.status().wrap_err("Failed to execute git clone")?;
-    if !clone_status.success() {
-        error!("Cloning failed for {}: {}", repospec, clone_status);
-    }
-    Ok(clone_status.success())
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(&arg_refs, None).map(|_| true).or(Ok(false))
 }
 
 fn find_ssh_key_for_org(repospec: &str) -> Result<Option<String>> {
