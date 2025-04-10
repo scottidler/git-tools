@@ -6,6 +6,7 @@ members = [
   "ls-github-repos",
   "reposlug",
   "stale-branches",
+  "stale-prs",
 ]
 
 resolver = "2"
