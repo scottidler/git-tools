@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_yaml;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::process::{Command as SysCommand};
+use std::process::Command;
 use chrono::{Utc, NaiveDate};
 
 mod built_info {
@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Cli::parse();
 
-    SysCommand::new("git")
+    Command::new("git")
         .args(["fetch", "origin", "--prune"])
         .output()
         .wrap_err("Failed to prune local cache of git branches")?;
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
 }
 
 fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)>> {
-    let output = SysCommand::new("git")
+    let output = Command::new("git")
         .args(["for-each-ref", "--sort=-committerdate", ref_, "--format=%(committerdate:short) %(refname:short) %(committername)"])
         .output()
         .wrap_err("Failed to execute git command")?;
@@ -98,4 +98,3 @@ fn generate_yaml(branches: &[(String, i64, String)]) -> Result<()> {
 
     Ok(())
 }
-
