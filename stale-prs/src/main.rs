@@ -121,7 +121,7 @@ async fn get_stale_prs(days: i64, reposlug: &str) -> Result<Vec<(String, i64, St
             if age_days >= days {
                 // Use the author login, defaulting to "Unknown" if not available.
                 let author = pr.author.map(|a| a.login).unwrap_or_else(|| "Unknown".to_string());
-                let title_with_number = format!("{} (pr #{})", pr.title, pr.number);
+                let title_with_number = format!("{} (pr {})", pr.title, pr.number);
                 Some((title_with_number, age_days, author))
             } else {
                 None
