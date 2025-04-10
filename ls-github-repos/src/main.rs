@@ -71,12 +71,20 @@ async fn main() -> Result<()> {
 
     let token = fs::read_to_string(token_file_path)
         .map_err(|e| eyre!("Failed to read token file: {}", e))?
-        .trim().to_string();
+        .trim()
+        .to_string();
 
     debug!("Trimmed token: '{}'", token);
 
     let repo_type = determine_repo_type(&args.name, &token).await?;
-    let repo_data = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
+    let mut repo_data = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
+
+    // Sort based on the provided flag: if --age is set, sort by created_at (oldest first), otherwise sort alphabetically by repo name.
+    if args.age {
+        repo_data.sort_by(|a, b| a.1.cmp(&b.1));
+    } else {
+        repo_data.sort_by(|a, b| a.0.cmp(&b.0));
+    }
 
     for (repo_name, created_at) in repo_data {
         if args.age {
@@ -123,22 +131,34 @@ async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
     Err(eyre!("'{}' is neither a valid GitHub user nor organization, or your token lacks access.", name))
 }
 
-async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<(String, String)>> {
+async fn ls_github_repos(
+    repo_type: RepoType,
+    name: &str,
+    archived: bool,
+    token: &str,
+) -> Result<Vec<(String, String)>> {
     let client = Client::new();
     let url = repo_type.repo_url(name);
     let mut headers = header::HeaderMap::new();
     let auth_value = format!("token {}", token);
 
-    headers.insert("Authorization", header::HeaderValue::from_str(&auth_value)
-        .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?);
+    headers.insert(
+        "Authorization",
+        header::HeaderValue::from_str(&auth_value)
+            .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?,
+    );
     headers.insert("User-Agent", header::HeaderValue::from_static("reqwest"));
-    headers.insert("Accept", header::HeaderValue::from_static("application/vnd.github.v3+json"));
+    headers.insert(
+        "Accept",
+        header::HeaderValue::from_static("application/vnd.github.v3+json"),
+    );
 
     let mut repo_data = Vec::new();
     let mut page = 1;
 
     loop {
-        let response = client.get(&url)
+        let response = client
+            .get(&url)
             .headers(headers.clone())
             .query(&[("page", page.to_string()), ("per_page", "100".to_string())])
             .send()
@@ -152,7 +172,13 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
         }
 
         let response_json: Vec<Value> = serde_json::from_str(&response_text)
-            .map_err(|e| eyre!("Error decoding response body: {}\nRaw response: {}", e, response_text))?;
+            .map_err(|e| {
+                eyre!(
+                    "Error decoding response body: {}\nRaw response: {}",
+                    e,
+                    response_text
+                )
+            })?;
 
         if response_json.is_empty() {
             break;
@@ -160,7 +186,10 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
 
         for repo in response_json {
             if archived || !repo["archived"].as_bool().unwrap_or(false) {
-                if let (Some(repo_name), Some(created_at)) = (repo["full_name"].as_str(), repo["created_at"].as_str()) {
+                if let (Some(repo_name), Some(created_at)) = (
+                    repo["full_name"].as_str(),
+                    repo["created_at"].as_str(),
+                ) {
                     let date = created_at[..10].to_string();
                     repo_data.push((repo_name.to_owned(), date));
                 }
@@ -169,6 +198,5 @@ async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token:
         page += 1;
     }
 
-    repo_data.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(repo_data)
 }
