@@ -1,0 +1,11 @@
+[package]
+name = "ls-owners"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { workspace = true }
+eyre = { workspace = true }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_yaml = "0.9.34"
+regex = "1.11.1"

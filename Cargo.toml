@@ -4,6 +4,7 @@ members = [
   "filter-ref",
   "ls-git-repos",
   "ls-github-repos",
+  "ls-owners",
   "reposlug",
   "stale-branches",
   "stale-prs",
