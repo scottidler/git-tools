@@ -23,36 +23,37 @@ fn main() -> Result<()> {
     let mut exit_code = 0;
 
     for path_str in &cli.paths {
-        // 1️⃣ Locate repo root and slug
         let (root_path, slug) = find_repo_root_and_slug(path_str)?;
 
-        // 2️⃣ Load CODEOWNERS entries
         match load_ownership(&root_path)? {
             Ownership::Missing => {
-                out.insert(slug, Value::String("MISSING_CODEOWNERS".into()));
+                out.insert(
+                    format!("{slug} (unowned)"),
+                    Value::String("MISSING_CODEOWNERS".into()),
+                );
                 exit_code = 1;
-                continue;
             }
             Ownership::Empty => {
-                out.insert(slug, Value::String("EMPTY_CODEOWNERS".into()));
+                out.insert(
+                    format!("{slug} (unowned)"),
+                    Value::String("EMPTY_CODEOWNERS".into()),
+                );
                 exit_code = 1;
-                continue;
             }
             Ownership::Present(entries) => {
-                // 3️⃣ Gather all code files
                 let code_files = gather_code_files(&root_path)?;
-
-                // 4️⃣ Determine which top‐level dirs are un-owned
-                let unowned = determine_unowned_paths(&entries, &code_files);
-
-                // 5️⃣ Build the YAML mapping for this repo
-                let mapping = build_repo_mapping(entries, unowned);
-                out.insert(slug, Value::Mapping(mapping));
+                let unowned_dirs = determine_unowned_paths(&entries, &code_files);
+                let status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
+                let mapping = build_repo_mapping(entries, unowned_dirs);
+                out.insert(
+                    format!("{slug} ({status})"),
+                    Value::Mapping(mapping),
+                );
             }
         }
     }
 
-    // 6️⃣ Emit final YAML and exit
+    // Emit final YAML and exit with the accumulated code
     print_yaml_and_exit(out, exit_code);
 }
 
@@ -165,12 +166,12 @@ fn determine_unowned_paths(
 }
 
 /// Builds the `serde_yaml::Mapping` for a repo:
-/// each path → owner(s) or `"UNOWNED"`, ordered with `/` first, then by path depth, then lexically.
+/// each path → owner(s) or `"UNOWNED"`, in the desired order.
 fn build_repo_mapping(
     entries: BTreeMap<String, Vec<String>>,
     unowned: BTreeSet<String>,
 ) -> Mapping {
-    // 1. Merge keys
+    // 1. Collect all keys (owned + unowned)
     let mut all_keys: Vec<String> = entries.keys().cloned().collect();
     for dir in &unowned {
         if !entries.contains_key(dir) {
@@ -178,31 +179,27 @@ fn build_repo_mapping(
         }
     }
 
-    // 2. Sort with custom comparator
+    // 2. Sort: "/" first, then by segment count (shallow → deep), then lexicographically
     all_keys.sort_by(|a, b| {
-        // "/" always first
         if a == "/" && b != "/" {
             return std::cmp::Ordering::Less;
         }
         if b == "/" && a != "/" {
             return std::cmp::Ordering::Greater;
         }
-        // compare by number of segments ("/foo/bar/" → 2), fewer first
         let depth = |s: &str| s.trim_matches('/').split('/').filter(|p| !p.is_empty()).count();
-        let da = depth(a);
-        let db = depth(b);
-        match da.cmp(&db) {
+        match depth(a).cmp(&depth(b)) {
             std::cmp::Ordering::Equal => a.cmp(b),
             other => other,
         }
     });
 
-    // 3. Build mapping in sorted order
+    // 3. Build mapping in that order
     let mut map = Mapping::new();
     for key in all_keys {
-        let value = if let Some(owners) = entries.get(&key) {
+        let val = if let Some(owners) = entries.get(&key) {
             match owners.len() {
-                0 => Value::String("UNOWNED".into()), // should not happen
+                0 => Value::String("UNOWNED".into()),
                 1 => Value::String(owners[0].clone()),
                 _ => {
                     let seq = owners.iter().cloned().map(Value::String).collect();
@@ -212,9 +209,8 @@ fn build_repo_mapping(
         } else {
             Value::String("UNOWNED".into())
         };
-        map.insert(Value::String(key), value);
+        map.insert(Value::String(key), val);
     }
-
     map
 }
 
