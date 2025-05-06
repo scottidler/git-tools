@@ -9,9 +9,41 @@ use std::{
     process::{exit, Command},
 };
 
+const TOP_AUTHORS: usize = 5;
+
+/// Reads ex-employees for the given org from `~/.config/ls-owners/{org}/ex-employees`
+fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
+    let mut set = BTreeSet::new();
+    if let Some(mut cfg) = dirs::config_dir() {
+        // note: use "ls-owners" to match your actual config directory
+        cfg.push("ls-owners");
+        cfg.push(org);
+        cfg.push("ex-employees");
+        if let Ok(data) = fs::read_to_string(&cfg) {
+            for line in data.lines() {
+                let name = line.trim();
+                if !name.is_empty() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(set)
+}
+
 #[derive(Parser)]
 #[command(name = "ls-owners", about = "List CODEOWNERS and detect un-owned code paths")]
 struct Cli {
+    /// Only show repos with these statuses: owned, unowned, partial
+    #[arg(
+        short = 'o',
+        long = "only",
+        value_name = "FILTER",
+        num_args = 1..,
+        value_parser = ["owned", "unowned", "partial"]
+    )]
+    only: Vec<String>,
+
     /// One or more paths to Git repos (defaults to current directory)
     #[arg(value_name = "PATH", default_values = &["."], num_args = 0..)]
     paths: Vec<String>,
@@ -19,42 +51,124 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Prepare an optional filter set
+    let filter_set: Option<BTreeSet<String>> = if cli.only.is_empty() {
+        None
+    } else {
+        Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
+    };
+
     let mut out = BTreeMap::<String, Value>::new();
     let mut exit_code = 0;
 
     for path_str in &cli.paths {
         let (root_path, slug) = find_repo_root_and_slug(path_str)?;
 
+        // load ex-employees for this org
+        let org = slug
+            .split('/')
+            .next()
+            .unwrap_or("unknown");
+        let exclude = read_ex_employees(org)?;
+
         match load_ownership(&root_path)? {
             Ownership::Missing => {
-                out.insert(
-                    format!("{slug} (unowned)"),
+                let mut repo_map = Mapping::new();
+                repo_map.insert(
+                    Value::String("paths".into()),
                     Value::String("MISSING_CODEOWNERS".into()),
                 );
+                let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
+                let seq = authors.into_iter().map(Value::String).collect();
+                repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
+                out.insert(format!("{slug} (unowned)"), Value::Mapping(repo_map));
                 exit_code = 1;
             }
             Ownership::Empty => {
-                out.insert(
-                    format!("{slug} (unowned)"),
+                let mut repo_map = Mapping::new();
+                repo_map.insert(
+                    Value::String("paths".into()),
                     Value::String("EMPTY_CODEOWNERS".into()),
                 );
+                let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
+                let seq = authors.into_iter().map(Value::String).collect();
+                repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
+                out.insert(format!("{slug} (unowned)"), Value::Mapping(repo_map));
                 exit_code = 1;
             }
             Ownership::Present(entries) => {
                 let code_files = gather_code_files(&root_path)?;
                 let unowned_dirs = determine_unowned_paths(&entries, &code_files);
                 let status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
-                let mapping = build_repo_mapping(entries, unowned_dirs);
-                out.insert(
-                    format!("{slug} ({status})"),
-                    Value::Mapping(mapping),
+
+                let paths_mapping = build_repo_mapping(entries, unowned_dirs);
+                let mut repo_map = Mapping::new();
+                repo_map.insert(
+                    Value::String("paths".into()),
+                    Value::Mapping(paths_mapping),
                 );
+
+                if status != "owned" {
+                    let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
+                    let seq = authors.into_iter().map(Value::String).collect::<Vec<_>>();
+                    repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
+                }
+
+                out.insert(format!("{slug} ({status})"), Value::Mapping(repo_map));
             }
         }
     }
 
-    // Emit final YAML and exit with the accumulated code
-    print_yaml_and_exit(out, exit_code);
+    // If the user requested --only, filter the map down to matching statuses
+    if let Some(filters) = filter_set {
+        out.retain(|repo_key, _| {
+            // repo_key is like "org/repo (owned)"
+            if let (Some(open), Some(close)) = (repo_key.rfind('('), repo_key.rfind(')')) {
+                let status = &repo_key[open + 1..close];
+                filters.contains(&status.to_lowercase())
+            } else {
+                false
+            }
+        });
+    }
+
+    print_manual_yaml_and_exit(&out, exit_code);
+}
+
+/// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
+/// filtering out any whose full name appears in `exclude`.
+fn get_top_authors(
+    repo: &Path,
+    limit: usize,
+    exclude: &BTreeSet<String>,
+) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(&["shortlog", "-s", "-n", "--all", "--no-merges"])
+        .output()
+        .context("git shortlog failed")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let mut authors = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        let mut parts = line.split_whitespace();
+        if let Some(count) = parts.next() {
+            let name = parts.collect::<Vec<_>>().join(" ");
+            if exclude.contains(&name) {
+                continue;
+            }
+            authors.push(format!("{name} ({count})"));
+            if authors.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(authors)
 }
 
 /// Finds the repo root (via `git rev-parse`) and parses `origin` → `org/repo`.
@@ -214,10 +328,63 @@ fn build_repo_mapping(
     map
 }
 
-/// Prints the final YAML map and exits with the given code.
-fn print_yaml_and_exit(map: BTreeMap<String, Value>, code: i32) -> ! {
-    let s = serde_yaml::to_string(&map).unwrap();
-    print!("{s}");
+/// Print our nested YAML in block style:
+/// - “paths” is a nested mapping
+/// - “authors” is always a block list of “Name (count)”
+fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
+    for (repo, val) in map {
+        match val {
+            Value::String(s) => {
+                println!("{repo}: {s}");
+            }
+            Value::Mapping(m) => {
+                println!("{repo}:");
+                for (k, v) in m {
+                    let key = k.as_str().unwrap_or_default();
+                    match v {
+                        Value::Mapping(paths_m) if key == "paths" => {
+                            println!("  paths:");
+                            for (p_k, p_v) in paths_m {
+                                let path = p_k.as_str().unwrap_or_default();
+                                match p_v {
+                                    Value::Sequence(seq) => {
+                                        let owners: Vec<&str> =
+                                            seq.iter().filter_map(Value::as_str).collect();
+                                        if owners.len() == 1 {
+                                            println!("    {path}: {}", owners[0]);
+                                        } else {
+                                            println!("    {path}: [{}]", owners.join(", "));
+                                        }
+                                    }
+                                    Value::String(s2) => {
+                                        println!("    {path}: {s2}");
+                                    }
+                                    _ => {
+                                        println!("    {path}: {p_v:?}");
+                                    }
+                                }
+                            }
+                        }
+                        Value::Sequence(authors) if key == "authors" => {
+                            println!("  authors:");
+                            for author in authors {
+                                if let Some(name) = author.as_str() {
+                                    println!("    - {name}");
+                                }
+                            }
+                        }
+                        _ => {
+                            // fallback for other unexpected entries
+                            println!("  {key}: {v:?}");
+                        }
+                    }
+                }
+            }
+            other => {
+                println!("{repo}: {other:?}");
+            }
+        }
+    }
     exit(code);
 }
 
