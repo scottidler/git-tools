@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{exit, Command},
 };
+use rayon::prelude::*;
 
 const TOP_AUTHORS: usize = 5;
 
@@ -52,88 +53,156 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Prepare an optional filter set
+    // Prepare optional filter set
     let filter_set: Option<BTreeSet<String>> = if cli.only.is_empty() {
         None
     } else {
         Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
     };
 
-    let mut out = BTreeMap::<String, Value>::new();
-    let mut exit_code = 0;
+    // ② discover all git-repo roots under the CLI paths
+    let repo_dirs = find_repo_paths(&cli.paths)
+        .context("failed to scan for repositories")?;
 
-    for path_str in &cli.paths {
-        let (root_path, slug) = find_repo_root_and_slug(path_str)?;
-
-        // load ex-employees for this org
-        let org = slug
-            .split('/')
-            .next()
-            .unwrap_or("unknown");
-        let exclude = read_ex_employees(org)?;
-
-        match load_ownership(&root_path)? {
-            Ownership::Missing => {
-                let mut repo_map = Mapping::new();
-                repo_map.insert(
-                    Value::String("paths".into()),
-                    Value::String("MISSING_CODEOWNERS".into()),
-                );
-                let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
-                let seq = authors.into_iter().map(Value::String).collect();
-                repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
-                out.insert(format!("{slug} (unowned)"), Value::Mapping(repo_map));
-                exit_code = 1;
+    // ③ process each repo in parallel, collecting only those with actual output:
+    let results: Vec<(String, Value)> = repo_dirs
+        .par_iter()
+        .filter_map(|root_path| {
+            // duplicate of your per-repo logic, but returning Option
+            match try_process_repo(root_path, &filter_set) {
+                Ok(Some((slug_status, mapping))) => Some((slug_status, Value::Mapping(mapping))),
+                Ok(None) => None, // filtered out or fully owned with --only
+                Err(err) => {
+                    eprintln!("❌ {}: {}", root_path.display(), err);
+                    None
+                }
             }
-            Ownership::Empty => {
-                let mut repo_map = Mapping::new();
-                repo_map.insert(
-                    Value::String("paths".into()),
-                    Value::String("EMPTY_CODEOWNERS".into()),
-                );
-                let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
-                let seq = authors.into_iter().map(Value::String).collect();
-                repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
-                out.insert(format!("{slug} (unowned)"), Value::Mapping(repo_map));
-                exit_code = 1;
-            }
-            Ownership::Present(entries) => {
-                let code_files = gather_code_files(&root_path)?;
-                let unowned_dirs = determine_unowned_paths(&entries, &code_files);
-                let status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
+        })
+        .collect();
 
-                let paths_mapping = build_repo_mapping(entries, unowned_dirs);
-                let mut repo_map = Mapping::new();
-                repo_map.insert(
-                    Value::String("paths".into()),
-                    Value::Mapping(paths_mapping),
-                );
+    // assemble into a BTreeMap so we can use your existing printer
+    let mut out = BTreeMap::new();
+    let exit_code = results.iter().any(|(_, v)| {
+        // any Unowned/Empty => nonzero exit
+        if let Value::Mapping(m) = v {
+            // inspect v or keep track in try_process_repo
+            m.contains_key(&Value::String("authors".into()))
+        } else {
+            false
+        }
+    }).then(|| 1).unwrap_or(0);
 
-                if status != "owned" {
-                    let authors = get_top_authors(&root_path, TOP_AUTHORS, &exclude)?;
-                    let seq = authors.into_iter().map(Value::String).collect::<Vec<_>>();
-                    repo_map.insert(Value::String("authors".into()), Value::Sequence(seq));
+    for (k, v) in results {
+        out.insert(k, v);
+    }
+
+    print_manual_yaml_and_exit(&out, exit_code);
+}
+
+/// Finds all Git repositories under the given paths:
+/// - If a path itself has a `.git` folder, it’s treated as a repo root.
+/// - Otherwise it scans first-level subdirectories for `.git`.
+/// - For any first-level subdirectory that isn’t a repo, it also scans its immediate children,
+///   to pick up structures like `./org/<repo>`.
+fn find_repo_paths(paths: &[String]) -> eyre::Result<Vec<PathBuf>> {
+    let mut repos = Vec::new();
+
+    for p in paths {
+        let pb = PathBuf::from(p);
+
+        // 1) If this path is itself a repo root, include it.
+        if pb.join(".git").is_dir() {
+            repos.push(pb.clone());
+            continue;
+        }
+
+        // 2) Otherwise, if it’s a directory, scan its children.
+        if pb.is_dir() {
+            for entry in fs::read_dir(&pb).context("reading directory")? {
+                let entry = entry?;
+                let child = entry.path();
+
+                // 2a) If child is a repo, include it.
+                if child.join(".git").is_dir() {
+                    repos.push(child.clone());
+                    continue;
                 }
 
-                out.insert(format!("{slug} ({status})"), Value::Mapping(repo_map));
+                // 2b) Otherwise, if the child is a directory, scan *its* immediate children.
+                if child.is_dir() {
+                    for subentry in fs::read_dir(&child).context("reading subdirectory")? {
+                        let subentry = subentry?;
+                        let sub = subentry.path();
+                        if sub.join(".git").is_dir() {
+                            repos.push(sub);
+                        }
+                    }
+                }
             }
         }
     }
 
-    // If the user requested --only, filter the map down to matching statuses
-    if let Some(filters) = filter_set {
-        out.retain(|repo_key, _| {
-            // repo_key is like "org/repo (owned)"
-            if let (Some(open), Some(close)) = (repo_key.rfind('('), repo_key.rfind(')')) {
-                let status = &repo_key[open + 1..close];
-                filters.contains(&status.to_lowercase())
-            } else {
-                false
+    Ok(repos)
+}
+
+// Extracted per-repo logic, return None if should be skipped entirely:
+fn try_process_repo(
+    root_path: &PathBuf,
+    filter_set: &Option<BTreeSet<String>>,
+) -> Result<Option<(String, Mapping)>> {
+    // Determine actual git root and "org/repo" slug
+    let (repo_root, slug) = find_repo_root_and_slug(root_path.to_str().unwrap())?;
+    let exclude = read_ex_employees(&slug.split('/').next().unwrap_or("unknown"))?;
+
+    // We don't need the third element beyond matching on status & mapping
+    let (status, mapping, _) = match load_ownership(&repo_root)? {
+        Ownership::Missing => {
+            let mut m = Mapping::new();
+            m.insert(Value::String("paths".into()), Value::String("MISSING_CODEOWNERS".into()));
+            let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+            let seq = authors.into_iter().map(Value::String).collect();
+            m.insert(Value::String("authors".into()), Value::Sequence(seq));
+            ("unowned", m, true)
+        }
+        Ownership::Empty => {
+            let mut m = Mapping::new();
+            m.insert(Value::String("paths".into()), Value::String("EMPTY_CODEOWNERS".into()));
+            let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+            let seq = authors.into_iter().map(Value::String).collect();
+            m.insert(Value::String("authors".into()), Value::Sequence(seq));
+            ("unowned", m, true)
+        }
+        Ownership::Present(entries) => {
+            let code_files = gather_code_files(&repo_root)?;
+            let unowned_dirs = determine_unowned_paths(&entries, &code_files);
+            let status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::Mapping(build_repo_mapping(entries, unowned_dirs)),
+            );
+
+            // include authors only for partial/unowned
+            let mut has_authors = false;
+            if status != "owned" {
+                let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+                let seq = authors.into_iter().map(Value::String).collect();
+                m.insert(Value::String("authors".into()), Value::Sequence(seq));
+                has_authors = true;
             }
-        });
+            (status, m, has_authors)
+        }
+    };
+
+    // Apply `--only` filtering if requested
+    if let Some(filters) = filter_set {
+        if !filters.contains(&status.to_lowercase()) {
+            return Ok(None);
+        }
     }
 
-    print_manual_yaml_and_exit(&out, exit_code);
+    let key = format!("{slug} ({status})");
+    Ok(Some((key, mapping)))
 }
 
 /// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
@@ -328,9 +397,10 @@ fn build_repo_mapping(
     map
 }
 
-/// Print our nested YAML in block style:
+/// Print our nested YAML in block style, then print a count of matched repos and exit:
 /// - “paths” is a nested mapping
 /// - “authors” is always a block list of “Name (count)”
+/// - After all repos are printed, it prints “Matched X repos”
 fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
     for (repo, val) in map {
         match val {
@@ -385,6 +455,10 @@ fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
             }
         }
     }
+
+    // Summary line: count of repos that were printed
+    println!("Matched {} repos", map.len());
+
     exit(code);
 }
 
