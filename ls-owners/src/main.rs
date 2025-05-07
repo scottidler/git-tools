@@ -45,6 +45,10 @@ struct Cli {
     )]
     only: Vec<String>,
 
+    /// Show detailed output (full YAML-style listing)
+    #[arg(short = 'd', long = "detailed")]
+    detailed: bool,
+
     /// One or more paths to Git repos (defaults to current directory)
     #[arg(value_name = "PATH", default_values = &["."], num_args = 0..)]
     paths: Vec<String>,
@@ -53,25 +57,24 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Prepare optional filter set
+    // filter set from --only
     let filter_set: Option<BTreeSet<String>> = if cli.only.is_empty() {
         None
     } else {
         Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
     };
 
-    // ② discover all git-repo roots under the CLI paths
+    // discover repos
     let repo_dirs = find_repo_paths(&cli.paths)
         .context("failed to scan for repositories")?;
 
-    // ③ process each repo in parallel, collecting only those with actual output:
+    // process each repo
     let results: Vec<(String, Value)> = repo_dirs
         .par_iter()
         .filter_map(|root_path| {
-            // duplicate of your per-repo logic, but returning Option
             match try_process_repo(root_path, &filter_set) {
                 Ok(Some((slug_status, mapping))) => Some((slug_status, Value::Mapping(mapping))),
-                Ok(None) => None, // filtered out or fully owned with --only
+                Ok(None) => None,
                 Err(err) => {
                     eprintln!("❌ {}: {}", root_path.display(), err);
                     None
@@ -80,12 +83,11 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    // assemble into a BTreeMap so we can use your existing printer
+    // assemble output map and determine exit code
     let mut out = BTreeMap::new();
     let exit_code = results.iter().any(|(_, v)| {
-        // any Unowned/Empty => nonzero exit
         if let Value::Mapping(m) = v {
-            // inspect v or keep track in try_process_repo
+            // any unowned/partial => nonzero
             m.contains_key(&Value::String("authors".into()))
         } else {
             false
@@ -96,7 +98,16 @@ fn main() -> Result<()> {
         out.insert(k, v);
     }
 
-    print_manual_yaml_and_exit(&out, exit_code);
+    let sorted = sorted_entries(&out);
+
+    if cli.detailed {
+        print_detailed(&sorted);
+    } else {
+        print_simplified(&sorted);
+    }
+
+    // exit last, using the computed code
+    exit(exit_code);
 }
 
 /// Finds all Git repositories under the given paths:
@@ -397,22 +408,64 @@ fn build_repo_mapping(
     map
 }
 
-/// Print our nested YAML in block style, then print a count of matched repos and exit:
-/// - “paths” is a nested mapping
-/// - “authors” is always a block list of “Name (count)”
-/// - After all repos are printed, it prints “Matched X repos”
-fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
-    for (repo, val) in map {
+/// Return all entries sorted by status (unowned, partial, owned) then alphabetically by slug.
+fn sorted_entries(map: &BTreeMap<String, Value>) -> Vec<(&String, &Value)> {
+    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+
+    // Map status → sort priority
+    fn status_rank(status: &str) -> usize {
+        match status {
+            "unowned" => 0,
+            "partial" => 1,
+            "owned"   => 2,
+            _         => 3,
+        }
+    }
+
+    // Split "slug (status)" into (slug, status)
+    fn split_slug_status(s: &str) -> (&str, &str) {
+        if let Some(idx) = s.rfind(" (") {
+            let slug = &s[..idx];
+            let status = &s[idx + 2 .. s.len() - 1];
+            (slug, status)
+        } else {
+            (s, "")
+        }
+    }
+
+    entries.sort_by(|(k1, _), (k2, _)| {
+        let (slug1, status1) = split_slug_status(k1);
+        let (slug2, status2) = split_slug_status(k2);
+        let r1 = status_rank(status1);
+        let r2 = status_rank(status2);
+
+        r1.cmp(&r2).then_with(|| slug1.cmp(slug2))
+    });
+
+    entries
+}
+
+/// Prints just the “slug (status)” lines from sorted entries, then summary count.
+fn print_simplified(entries: &[(&String, &Value)]) {
+    for (key, _) in entries {
+        println!("{}", key);
+    }
+    println!("count {}", entries.len());
+}
+
+/// Prints full YAML-style output from sorted entries, then summary count.
+fn print_detailed(entries: &[(&String, &Value)]) {
+    for (key, val) in entries {
         match val {
             Value::String(s) => {
-                println!("{repo}: {s}");
+                println!("{key}: {s}");
             }
             Value::Mapping(m) => {
-                println!("{repo}:");
+                println!("{key}:");
                 for (k, v) in m {
-                    let key = k.as_str().unwrap_or_default();
+                    let field = k.as_str().unwrap_or_default();
                     match v {
-                        Value::Mapping(paths_m) if key == "paths" => {
+                        Value::Mapping(paths_m) if field == "paths" => {
                             println!("  paths:");
                             for (p_k, p_v) in paths_m {
                                 let path = p_k.as_str().unwrap_or_default();
@@ -435,7 +488,7 @@ fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
                                 }
                             }
                         }
-                        Value::Sequence(authors) if key == "authors" => {
+                        Value::Sequence(authors) if field == "authors" => {
                             println!("  authors:");
                             for author in authors {
                                 if let Some(name) = author.as_str() {
@@ -444,22 +497,17 @@ fn print_manual_yaml_and_exit(map: &BTreeMap<String, Value>, code: i32) -> ! {
                             }
                         }
                         _ => {
-                            // fallback for other unexpected entries
-                            println!("  {key}: {v:?}");
+                            println!("  {field}: {v:?}");
                         }
                     }
                 }
             }
             other => {
-                println!("{repo}: {other:?}");
+                println!("{key}: {other:?}");
             }
         }
     }
-
-    // Summary line: count of repos that were printed
-    println!("Matched {} repos", map.len());
-
-    exit(code);
+    println!("Matched {} repos", entries.len());
 }
 
 /// Parses GitHub origin URLs into `org/repo`, supporting both SSH and HTTPS.
