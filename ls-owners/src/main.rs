@@ -9,27 +9,14 @@ use std::{
     process::{exit, Command},
 };
 use rayon::prelude::*;
+use colored::Colorize;
 
 const TOP_AUTHORS: usize = 5;
 
-/// Reads ex-employees for the given org from `~/.config/ls-owners/{org}/ex-employees`
-fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
-    let mut set = BTreeSet::new();
-    if let Some(mut cfg) = dirs::config_dir() {
-        // note: use "ls-owners" to match your actual config directory
-        cfg.push("ls-owners");
-        cfg.push(org);
-        cfg.push("ex-employees");
-        if let Ok(data) = fs::read_to_string(&cfg) {
-            for line in data.lines() {
-                let name = line.trim();
-                if !name.is_empty() {
-                    set.insert(name.to_string());
-                }
-            }
-        }
-    }
-    Ok(set)
+enum Ownership {
+    Missing,
+    Empty,
+    Present(BTreeMap<String, Vec<String>>),
 }
 
 #[derive(Parser)]
@@ -108,6 +95,26 @@ fn main() -> Result<()> {
 
     // exit last, using the computed code
     exit(exit_code);
+}
+
+/// Reads ex-employees for the given org from `~/.config/ls-owners/{org}/ex-employees`
+fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
+    let mut set = BTreeSet::new();
+    if let Some(mut cfg) = dirs::config_dir() {
+        // note: use "ls-owners" to match your actual config directory
+        cfg.push("ls-owners");
+        cfg.push(org);
+        cfg.push("ex-employees");
+        if let Ok(data) = fs::read_to_string(&cfg) {
+            for line in data.lines() {
+                let name = line.trim();
+                if !name.is_empty() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(set)
 }
 
 /// Finds all Git repositories under the given paths:
@@ -275,12 +282,6 @@ fn find_repo_root_and_slug(path_str: &str) -> Result<(PathBuf, String)> {
     Ok((repo_root, slug))
 }
 
-enum Ownership {
-    Missing,
-    Empty,
-    Present(BTreeMap<String, Vec<String>>),
-}
-
 /// Loads and parses `.github/CODEOWNERS`, classifying Missing, Empty, or Present(entries).
 fn load_ownership(root: &Path) -> Result<Ownership> {
     let codeowners = root.join(".github").join("CODEOWNERS");
@@ -445,27 +446,74 @@ fn sorted_entries(map: &BTreeMap<String, Value>) -> Vec<(&String, &Value)> {
     entries
 }
 
-/// Prints just the “slug (status)” lines from sorted entries, then summary count.
 fn print_simplified(entries: &[(&String, &Value)]) {
+    let status_width = "unowned".len();
+
     for (key, _) in entries {
-        println!("{}", key);
+        // split "slug (status)" into slug & status
+        let (slug, status) = if let Some(idx) = key.rfind(" (") {
+            let slug = &key[..idx];
+            // +2 to skip " (", and -1 to drop the trailing ")"
+            let status = &key[idx + 2 .. key.len() - 1];
+            (slug, status)
+        } else {
+            // fallback if format is unexpected
+            (key.as_str(), "")
+        };
+
+        // colorize status
+        let colored_status = match status {
+            "owned"   => status.green().bold(),
+            "partial" => status.yellow().bold(),
+            "unowned" => status.red().bold(),
+            other     => other.normal(),
+        };
+
+        // right-justify in a fixed column
+        let padded = format!("{:>width$}", colored_status, width = status_width);
+
+        // two spaces for a buffer, then the slug
+        println!("{} {}", padded, slug);
     }
+
     println!("count {}", entries.len());
 }
 
-/// Prints full YAML-style output from sorted entries, then summary count.
 fn print_detailed(entries: &[(&String, &Value)]) {
     for (key, val) in entries {
+        // split "slug (status)" into slug & status
+        let (slug, status) = if let Some(idx) = key.rfind(" (") {
+            let slug = &key[..idx];
+            // +2 to skip " (", and -1 to drop the trailing ")"
+            let status = &key[idx + 2 .. key.len() - 1];
+            (slug, status)
+        } else {
+            // fallback if format is unexpected
+            (key.as_str(), "")
+        };
+
+        // colorize status
+        let colored_status = match status {
+            "owned"   => status.green().bold(),
+            "partial" => status.yellow().bold(),
+            "unowned" => status.red().bold(),
+            other     => other.normal(),
+        };
+
+        // print status on the left, then slug with no extra buffer, then colon
+        println!("{} {}:", colored_status, slug);
+
         match val {
             Value::String(s) => {
-                println!("{key}: {s}");
+                // simple string value
+                println!("  {}", s);
             }
             Value::Mapping(m) => {
-                println!("{key}:");
+                // detailed mapping
                 for (k, v) in m {
                     let field = k.as_str().unwrap_or_default();
-                    match v {
-                        Value::Mapping(paths_m) if field == "paths" => {
+                    match (field, v) {
+                        ("paths", Value::Mapping(paths_m)) => {
                             println!("  paths:");
                             for (p_k, p_v) in paths_m {
                                 let path = p_k.as_str().unwrap_or_default();
@@ -474,39 +522,42 @@ fn print_detailed(entries: &[(&String, &Value)]) {
                                         let owners: Vec<&str> =
                                             seq.iter().filter_map(Value::as_str).collect();
                                         if owners.len() == 1 {
-                                            println!("    {path}: {}", owners[0]);
+                                            println!("    {}: {}", path, owners[0]);
                                         } else {
-                                            println!("    {path}: [{}]", owners.join(", "));
+                                            println!("    {}: [{}]", path, owners.join(", "));
                                         }
                                     }
                                     Value::String(s2) => {
-                                        println!("    {path}: {s2}");
+                                        println!("    {}: {}", path, s2);
                                     }
                                     _ => {
-                                        println!("    {path}: {p_v:?}");
+                                        println!("    {}: {:?}", path, p_v);
                                     }
                                 }
                             }
                         }
-                        Value::Sequence(authors) if field == "authors" => {
+                        ("authors", Value::Sequence(authors)) => {
                             println!("  authors:");
                             for author in authors {
                                 if let Some(name) = author.as_str() {
-                                    println!("    - {name}");
+                                    println!("    - {}", name);
                                 }
                             }
                         }
                         _ => {
-                            println!("  {field}: {v:?}");
+                            // any other fields
+                            println!("  {}: {:?}", field, v);
                         }
                     }
                 }
             }
             other => {
-                println!("{key}: {other:?}");
+                // unexpected variants
+                println!("  {:?}", other);
             }
         }
     }
+
     println!("Matched {} repos", entries.len());
 }
 
