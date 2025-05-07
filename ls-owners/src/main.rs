@@ -19,6 +19,13 @@ enum Ownership {
     Present(BTreeMap<String, Vec<String>>),
 }
 
+/// Holds each repository’s slug, its status, and the YAML value to print.
+struct Repo {
+    slug: String,
+    status: String,
+    value: Value,
+}
+
 #[derive(Parser)]
 #[command(name = "ls-owners", about = "List CODEOWNERS and detect un-owned code paths")]
 struct Cli {
@@ -44,48 +51,33 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // filter set from --only
-    let filter_set: Option<BTreeSet<String>> = if cli.only.is_empty() {
+    let filter_set = if cli.only.is_empty() {
         None
     } else {
         Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
     };
 
-    // discover repos
     let repo_dirs = find_repo_paths(&cli.paths)
         .context("failed to scan for repositories")?;
 
-    // process each repo
-    let results: Vec<(String, Value)> = repo_dirs
+    // Collect a Vec<Repo> rather than Vec<RepoResult>
+    let results: Vec<Repo> = repo_dirs
         .par_iter()
-        .filter_map(|root_path| {
-            match try_process_repo(root_path, &filter_set) {
-                Ok(Some((slug_status, mapping))) => Some((slug_status, Value::Mapping(mapping))),
-                Ok(None) => None,
-                Err(err) => {
-                    eprintln!("❌ {}: {}", root_path.display(), err);
-                    None
-                }
+        .filter_map(|root_path| match try_process_repo(root_path, &filter_set) {
+            Ok(Some((slug, status, mapping))) => Some(Repo {
+                slug,
+                status,
+                value: Value::Mapping(mapping),
+            }),
+            Ok(None) => None,
+            Err(err) => {
+                eprintln!("❌ {}: {}", root_path.display(), err);
+                None
             }
         })
         .collect();
 
-    // assemble output map and determine exit code
-    let mut out = BTreeMap::new();
-    let exit_code = results.iter().any(|(_, v)| {
-        if let Value::Mapping(m) = v {
-            // any unowned/partial => nonzero
-            m.contains_key(&Value::String("authors".into()))
-        } else {
-            false
-        }
-    }).then(|| 1).unwrap_or(0);
-
-    for (k, v) in results {
-        out.insert(k, v);
-    }
-
-    let sorted = sorted_entries(&out);
+    let sorted = sorted_entries(&results);
 
     if cli.detailed {
         print_detailed(&sorted);
@@ -93,7 +85,9 @@ fn main() -> Result<()> {
         print_simplified(&sorted);
     }
 
-    // exit last, using the computed code
+    let exit_code = results.iter().any(|r| r.status != "owned")
+        .then(|| 1)
+        .unwrap_or(0);
     exit(exit_code);
 }
 
@@ -163,52 +157,60 @@ fn find_repo_paths(paths: &[String]) -> eyre::Result<Vec<PathBuf>> {
     Ok(repos)
 }
 
-// Extracted per-repo logic, return None if should be skipped entirely:
 fn try_process_repo(
     root_path: &PathBuf,
     filter_set: &Option<BTreeSet<String>>,
-) -> Result<Option<(String, Mapping)>> {
+) -> Result<Option<(String, String, Mapping)>> {
     // Determine actual git root and "org/repo" slug
     let (repo_root, slug) = find_repo_root_and_slug(root_path.to_str().unwrap())?;
     let exclude = read_ex_employees(&slug.split('/').next().unwrap_or("unknown"))?;
 
-    // We don't need the third element beyond matching on status & mapping
+    // Determine status and build the YAML mapping
     let (status, mapping, _) = match load_ownership(&repo_root)? {
         Ownership::Missing => {
             let mut m = Mapping::new();
-            m.insert(Value::String("paths".into()), Value::String("MISSING_CODEOWNERS".into()));
+            m.insert(
+                Value::String("paths".into()),
+                Value::String("MISSING_CODEOWNERS".into()),
+            );
             let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
             let seq = authors.into_iter().map(Value::String).collect();
             m.insert(Value::String("authors".into()), Value::Sequence(seq));
-            ("unowned", m, true)
+            ("unowned".to_string(), m, true)
         }
         Ownership::Empty => {
             let mut m = Mapping::new();
-            m.insert(Value::String("paths".into()), Value::String("EMPTY_CODEOWNERS".into()));
+            m.insert(
+                Value::String("paths".into()),
+                Value::String("EMPTY_CODEOWNERS".into()),
+            );
             let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
             let seq = authors.into_iter().map(Value::String).collect();
             m.insert(Value::String("authors".into()), Value::Sequence(seq));
-            ("unowned", m, true)
+            ("unowned".to_string(), m, true)
         }
         Ownership::Present(entries) => {
             let code_files = gather_code_files(&repo_root)?;
             let unowned_dirs = determine_unowned_paths(&entries, &code_files);
-            let status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
+            let computed_status = if unowned_dirs.is_empty() {
+                "owned"
+            } else {
+                "partial"
+            };
             let mut m = Mapping::new();
             m.insert(
                 Value::String("paths".into()),
                 Value::Mapping(build_repo_mapping(entries, unowned_dirs)),
             );
 
-            // include authors only for partial/unowned
-            let mut has_authors = false;
-            if status != "owned" {
+            let has_authors = computed_status != "owned";
+            if has_authors {
                 let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
                 let seq = authors.into_iter().map(Value::String).collect();
                 m.insert(Value::String("authors".into()), Value::Sequence(seq));
-                has_authors = true;
             }
-            (status, m, has_authors)
+
+            (computed_status.to_string(), m, has_authors)
         }
     };
 
@@ -219,8 +221,8 @@ fn try_process_repo(
         }
     }
 
-    let key = format!("{slug} ({status})");
-    Ok(Some((key, mapping)))
+    // Return slug, status, and the mapping
+    Ok(Some((slug, status, mapping)))
 }
 
 /// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
@@ -409,13 +411,12 @@ fn build_repo_mapping(
     map
 }
 
-/// Return all entries sorted by status (unowned, partial, owned) then alphabetically by slug.
-fn sorted_entries(map: &BTreeMap<String, Value>) -> Vec<(&String, &Value)> {
-    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+/// Sort by status (unowned < partial < owned), then by slug
+fn sorted_entries(results: &[Repo]) -> Vec<&Repo> {
+    let mut refs: Vec<&Repo> = results.iter().collect();
 
-    // Map status → sort priority
-    fn status_rank(status: &str) -> usize {
-        match status {
+    fn rank(s: &str) -> usize {
+        match s {
             "unowned" => 0,
             "partial" => 1,
             "owned"   => 2,
@@ -423,136 +424,84 @@ fn sorted_entries(map: &BTreeMap<String, Value>) -> Vec<(&String, &Value)> {
         }
     }
 
-    // Split "slug (status)" into (slug, status)
-    fn split_slug_status(s: &str) -> (&str, &str) {
-        if let Some(idx) = s.rfind(" (") {
-            let slug = &s[..idx];
-            let status = &s[idx + 2 .. s.len() - 1];
-            (slug, status)
-        } else {
-            (s, "")
-        }
-    }
-
-    entries.sort_by(|(k1, _), (k2, _)| {
-        let (slug1, status1) = split_slug_status(k1);
-        let (slug2, status2) = split_slug_status(k2);
-        let r1 = status_rank(status1);
-        let r2 = status_rank(status2);
-
-        r1.cmp(&r2).then_with(|| slug1.cmp(slug2))
+    refs.sort_by(|a, b| {
+        rank(&a.status)
+            .cmp(&rank(&b.status))
+            .then_with(|| a.slug.cmp(&b.slug))
     });
 
-    entries
+    refs
 }
 
-fn print_simplified(entries: &[(&String, &Value)]) {
-    let status_width = "unowned".len();
+/// Simplified: color + status on left, two spaces, then slug.
+fn print_simplified(entries: &[&Repo]) {
+    let width = "unowned".len();
 
-    for (key, _) in entries {
-        // split "slug (status)" into slug & status
-        let (slug, status) = if let Some(idx) = key.rfind(" (") {
-            let slug = &key[..idx];
-            // +2 to skip " (", and -1 to drop the trailing ")"
-            let status = &key[idx + 2 .. key.len() - 1];
-            (slug, status)
-        } else {
-            // fallback if format is unexpected
-            (key.as_str(), "")
-        };
-
-        // colorize status
-        let colored_status = match status {
-            "owned"   => status.green().bold(),
-            "partial" => status.yellow().bold(),
-            "unowned" => status.red().bold(),
+    for r in entries {
+        let colored = match r.status.as_str() {
+            "owned"   => r.status.green().bold(),
+            "partial" => r.status.yellow().bold(),
+            "unowned" => r.status.red().bold(),
             other     => other.normal(),
         };
-
-        // right-justify in a fixed column
-        let padded = format!("{:>width$}", colored_status, width = status_width);
-
-        // two spaces for a buffer, then the slug
-        println!("{} {}", padded, slug);
+        let pad = format!("{:>width$}", colored, width = width);
+        println!("{} {}", pad, r.slug);
     }
 
     println!("count {}", entries.len());
 }
 
-fn print_detailed(entries: &[(&String, &Value)]) {
-    for (key, val) in entries {
-        // split "slug (status)" into slug & status
-        let (slug, status) = if let Some(idx) = key.rfind(" (") {
-            let slug = &key[..idx];
-            // +2 to skip " (", and -1 to drop the trailing ")"
-            let status = &key[idx + 2 .. key.len() - 1];
-            (slug, status)
-        } else {
-            // fallback if format is unexpected
-            (key.as_str(), "")
-        };
-
-        // colorize status
-        let colored_status = match status {
-            "owned"   => status.green().bold(),
-            "partial" => status.yellow().bold(),
-            "unowned" => status.red().bold(),
+/// Detailed: status + slug on one line (no buffer), then YAML-style indented under it.
+fn print_detailed(entries: &[&Repo]) {
+    for r in entries {
+        let colored = match r.status.as_str() {
+            "owned"   => r.status.green().bold(),
+            "partial" => r.status.yellow().bold(),
+            "unowned" => r.status.red().bold(),
             other     => other.normal(),
         };
 
-        // print status on the left, then slug with no extra buffer, then colon
-        println!("{} {}:", colored_status, slug);
+        // No padding or parentheses—just "status slug:"
+        println!("{} {}:", colored, r.slug);
 
-        match val {
+        match &r.value {
             Value::String(s) => {
-                // simple string value
                 println!("  {}", s);
             }
             Value::Mapping(m) => {
-                // detailed mapping
-                for (k, v) in m {
-                    let field = k.as_str().unwrap_or_default();
-                    match (field, v) {
-                        ("paths", Value::Mapping(paths_m)) => {
-                            println!("  paths:");
-                            for (p_k, p_v) in paths_m {
-                                let path = p_k.as_str().unwrap_or_default();
-                                match p_v {
-                                    Value::Sequence(seq) => {
-                                        let owners: Vec<&str> =
-                                            seq.iter().filter_map(Value::as_str).collect();
-                                        if owners.len() == 1 {
-                                            println!("    {}: {}", path, owners[0]);
-                                        } else {
-                                            println!("    {}: [{}]", path, owners.join(", "));
-                                        }
-                                    }
-                                    Value::String(s2) => {
-                                        println!("    {}: {}", path, s2);
-                                    }
-                                    _ => {
-                                        println!("    {}: {:?}", path, p_v);
-                                    }
+                if let Some(Value::Mapping(paths)) = m.get(&Value::String("paths".into())) {
+                    println!("  paths:");
+                    for (p, owners) in paths {
+                        let path = p.as_str().unwrap_or_default();
+                        match owners {
+                            Value::Sequence(seq) => {
+                                let list: Vec<&str> =
+                                    seq.iter().filter_map(Value::as_str).collect();
+                                if list.len() == 1 {
+                                    println!("    {}: {}", path, list[0]);
+                                } else {
+                                    println!("    {}: [{}]", path, list.join(", "));
                                 }
                             }
-                        }
-                        ("authors", Value::Sequence(authors)) => {
-                            println!("  authors:");
-                            for author in authors {
-                                if let Some(name) = author.as_str() {
-                                    println!("    - {}", name);
-                                }
+                            Value::String(s2) => {
+                                println!("    {}: {}", path, s2);
+                            }
+                            _ => {
+                                println!("    {}: {:?}", path, owners);
                             }
                         }
-                        _ => {
-                            // any other fields
-                            println!("  {}: {:?}", field, v);
+                    }
+                }
+                if let Some(Value::Sequence(authors)) = m.get(&Value::String("authors".into())) {
+                    println!("  authors:");
+                    for a in authors {
+                        if let Some(name) = a.as_str() {
+                            println!("    - {}", name);
                         }
                     }
                 }
             }
             other => {
-                // unexpected variants
                 println!("  {:?}", other);
             }
         }
