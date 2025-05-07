@@ -1,13 +1,13 @@
 [workspace]
 members = [
   "clone",
+  "reposlug",
   "filter-ref",
   "ls-git-repos",
   "ls-github-repos",
   "ls-owners",
-  "reposlug",
-  "stale-branches",
-  "stale-prs",
+  "ls-stale-branches",
+  "ls-stale-prs",
 ]
 
 resolver = "2"
