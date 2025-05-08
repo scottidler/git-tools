@@ -60,7 +60,6 @@ fn main() -> Result<()> {
     let repo_dirs = find_repo_paths(&cli.paths)
         .context("failed to scan for repositories")?;
 
-    // Collect a Vec<Repo> rather than Vec<RepoResult>
     let results: Vec<Repo> = repo_dirs
         .par_iter()
         .filter_map(|root_path| match try_process_repo(root_path, &filter_set) {
@@ -95,7 +94,6 @@ fn main() -> Result<()> {
 fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
     let mut set = BTreeSet::new();
     if let Some(mut cfg) = dirs::config_dir() {
-        // note: use "ls-owners" to match your actual config directory
         cfg.push("ls-owners");
         cfg.push(org);
         cfg.push("ex-employees");
@@ -122,25 +120,21 @@ fn find_repo_paths(paths: &[String]) -> eyre::Result<Vec<PathBuf>> {
     for p in paths {
         let pb = PathBuf::from(p);
 
-        // 1) If this path is itself a repo root, include it.
         if pb.join(".git").is_dir() {
             repos.push(pb.clone());
             continue;
         }
 
-        // 2) Otherwise, if it’s a directory, scan its children.
         if pb.is_dir() {
             for entry in fs::read_dir(&pb).context("reading directory")? {
                 let entry = entry?;
                 let child = entry.path();
 
-                // 2a) If child is a repo, include it.
                 if child.join(".git").is_dir() {
                     repos.push(child.clone());
                     continue;
                 }
 
-                // 2b) Otherwise, if the child is a directory, scan *its* immediate children.
                 if child.is_dir() {
                     for subentry in fs::read_dir(&child).context("reading subdirectory")? {
                         let subentry = subentry?;
@@ -161,11 +155,9 @@ fn try_process_repo(
     root_path: &PathBuf,
     filter_set: &Option<BTreeSet<String>>,
 ) -> Result<Option<(String, String, Mapping)>> {
-    // Determine actual git root and "org/repo" slug
     let (repo_root, slug) = find_repo_root_and_slug(root_path.to_str().unwrap())?;
     let exclude = read_ex_employees(&slug.split('/').next().unwrap_or("unknown"))?;
 
-    // Determine status and build the YAML mapping
     let (status, mapping, _) = match load_ownership(&repo_root)? {
         Ownership::Missing => {
             let mut m = Mapping::new();
@@ -214,14 +206,12 @@ fn try_process_repo(
         }
     };
 
-    // Apply `--only` filtering if requested
     if let Some(filters) = filter_set {
         if !filters.contains(&status.to_lowercase()) {
             return Ok(None);
         }
     }
 
-    // Return slug, status, and the mapping
     Ok(Some((slug, status, mapping)))
 }
 
@@ -368,7 +358,6 @@ fn build_repo_mapping(
     entries: BTreeMap<String, Vec<String>>,
     unowned: BTreeSet<String>,
 ) -> Mapping {
-    // 1. Collect all keys (owned + unowned)
     let mut all_keys: Vec<String> = entries.keys().cloned().collect();
     for dir in &unowned {
         if !entries.contains_key(dir) {
@@ -376,7 +365,6 @@ fn build_repo_mapping(
         }
     }
 
-    // 2. Sort: "/" first, then by segment count (shallow → deep), then lexicographically
     all_keys.sort_by(|a, b| {
         if a == "/" && b != "/" {
             return std::cmp::Ordering::Less;
@@ -391,7 +379,6 @@ fn build_repo_mapping(
         }
     });
 
-    // 3. Build mapping in that order
     let mut map = Mapping::new();
     for key in all_keys {
         let val = if let Some(owners) = entries.get(&key) {
@@ -461,7 +448,6 @@ fn print_detailed(entries: &[&Repo]) {
             other     => other.normal(),
         };
 
-        // No padding or parentheses—just "status slug:"
         println!("{} {}:", colored, r.slug);
 
         match &r.value {
