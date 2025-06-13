@@ -10,9 +10,9 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
-shellexpand = "3.1.0"
-tokio = { version = "1.43.0", features = ["full"] }
+shellexpand = "3.1.1"
+tokio = { version = "1.45.1", features = ["full"] }
 walkdir = "2.5.0"
-regex = "1.10.3"
+regex = "1.11.1"
 rust-ini = "0.21.1"
 

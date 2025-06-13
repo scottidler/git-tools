@@ -10,5 +10,5 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 git2 = "0.18.3"
-chrono = "0.4.39"
+chrono = "0.4.41"
 

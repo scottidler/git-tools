@@ -10,6 +10,6 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
-chrono = "0.4.39"
-serde = { version = "1.0.217", features = ["derive"] }
+chrono = "0.4.41"
+serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9.34"
