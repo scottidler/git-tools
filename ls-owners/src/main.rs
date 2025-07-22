@@ -2,14 +2,23 @@ use clap::Parser;
 use eyre::{Context, Result};
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
+use serde_json::Value as JsonValue;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env,
     fs,
     path::{Path, PathBuf},
     process::{exit, Command},
 };
 use rayon::prelude::*;
 use colored::Colorize;
+
+// for base64 decoding:
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use std::sync::{Arc, Mutex};
 
 const TOP_AUTHORS: usize = 5;
 
@@ -49,44 +58,90 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // 1) Parse CLI
     let cli = Cli::parse();
 
-    let filter_set = if cli.only.is_empty() {
-        None
-    } else {
-        Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
-    };
+    // 2) Grab GitHub token
+    let token = get_github_token()?;
 
-    let repo_dirs = find_repo_paths(&cli.paths)
-        .context("failed to scan for repositories")?;
+    // 3) Build a blocking reqwest client with default headers
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static("ls-owners"));
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("token {}", token))?,
+    );
+    let client = Client::builder()
+        .default_headers(headers)
+        .build()
+        .context("failed to build HTTP client")?;
 
-    let results: Vec<Repo> = repo_dirs
-        .par_iter()
-        .filter_map(|root_path| match try_process_repo(root_path, &filter_set) {
-            Ok(Some((slug, status, mapping))) => Some(Repo {
-                slug,
-                status,
-                value: Value::Mapping(mapping),
-            }),
-            Ok(None) => None,
-            Err(err) => {
-                eprintln!("❌ {}: {}", root_path.display(), err);
-                None
+    // 4) Load our on-disk ETag cache into a thread-safe mutex
+    let initial_cache = load_etag_cache()?;
+    let etag_cache = Arc::new(Mutex::new(initial_cache));
+
+    // 5) List all repositories in your org (change "your-org" to your real org login)
+    let repos: Vec<String> = list_github_repos("your-org", &client)
+        .context("failed to list GitHub repositories")?;
+
+    // 6) Fetch CODEOWNERS & build Repo items in parallel
+    let results: Vec<Repo> = repos
+        .into_par_iter()
+        .filter_map(|slug| {
+            // a) Pull the fetched ownership, updating the shared ETag cache
+            let ownership = {
+                let mut cache_lock = etag_cache.lock().unwrap();
+                match fetch_remote_codeowners(&slug, &client, &mut *cache_lock) {
+                    Ok(o) => o,
+                    Err(err) => {
+                        eprintln!("❌ {}: {}", slug, err);
+                        return None;
+                    }
+                }
+            };
+
+            // b) Restore ex-employees logic here
+            let exclude = match read_ex_employees(slug.split('/').next().unwrap_or("unknown")) {
+                Ok(set) => set,
+                Err(err) => {
+                    eprintln!("⚠️ could not read ex-employees for {}: {}", slug, err);
+                    BTreeSet::new()
+                }
+            };
+
+            // c) Build the Repo struct, filtering by ex-employees as needed
+            match try_build_repo(&slug, ownership, &exclude) {
+                Ok(Some(repo)) => Some(repo),
+                Ok(None) => None,
+                Err(err) => {
+                    eprintln!("❌ {}: {}", slug, err);
+                    None
+                }
             }
         })
         .collect();
 
+    // 7) Sort and print
     let sorted = sorted_entries(&results);
-
     if cli.detailed {
         print_detailed(&sorted);
     } else {
         print_simplified(&sorted);
     }
 
-    let exit_code = results.iter().any(|r| r.status != "owned")
-        .then(|| 1)
-        .unwrap_or(0);
+    // 8) Persist updated ETags
+    let final_cache = Arc::try_unwrap(etag_cache)
+        .expect("multiple Arc references to cache")
+        .into_inner()
+        .unwrap();
+    save_etag_cache(&final_cache).context("failed to save ETag cache")?;
+
+    // 9) Exit with non-zero if any repo was not fully owned
+    let exit_code = if results.iter().any(|r| r.status != "owned") {
+        1
+    } else {
+        0
+    };
     exit(exit_code);
 }
 
@@ -522,4 +577,219 @@ fn is_code_file(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// Load the ETag map from `~/.config/ls-owners/cache.json`.
+fn load_etag_cache() -> eyre::Result<HashMap<String, String>> {
+    let mut cfg = dirs::config_dir()
+        .ok_or_else(|| eyre::eyre!("couldn’t find config directory"))?;
+    cfg.push("ls-owners");
+    fs::create_dir_all(&cfg)?;
+    cfg.push("cache.json");
+
+    if !cfg.is_file() {
+        return Ok(HashMap::new());
+    }
+    let data = fs::read_to_string(&cfg)?;
+    let map: HashMap<String, String> = serde_json::from_str(&data)?;
+    Ok(map)
+}
+
+/// Save the ETag map back out to `~/.config/ls-owners/cache.json`.
+fn save_etag_cache(cache: &HashMap<String, String>) -> eyre::Result<()> {
+    let mut cfg = dirs::config_dir()
+        .ok_or_else(|| eyre::eyre!("couldn’t find config directory"))?;
+    cfg.push("ls-owners");
+    fs::create_dir_all(&cfg)?;
+    cfg.push("cache.json");
+
+    let data = serde_json::to_string_pretty(cache)?;
+    fs::write(&cfg, data)?;
+    Ok(())
+}
+
+/// Pull GITHUB_TOKEN or GH_TOKEN from the environment, or fail.
+fn get_github_token() -> eyre::Result<String> {
+    env::var("GITHUB_TOKEN")
+        .or_else(|_| env::var("GH_TOKEN"))
+        .map_err(|_| eyre::eyre!("GitHub token missing; set GITHUB_TOKEN or GH_TOKEN"))
+}
+
+/// List all repo slugs ("org/name") in the given org via the REST API.
+fn list_github_repos(org: &str, client: &Client) -> eyre::Result<Vec<String>> {
+    let mut page = 1;
+    let mut all = Vec::new();
+
+    loop {
+        let url = format!(
+            "https://api.github.com/orgs/{org}/repos?per_page=100&page={page}",
+            org = org,
+            page = page
+        );
+        let resp = client
+            .get(&url)
+            .send()?
+            .error_for_status()?;
+        let repos: Vec<JsonValue> = resp.json()?;
+        if repos.is_empty() {
+            break;
+        }
+        for repo in &repos {
+            if let Some(full) = repo
+                .get("full_name")
+                .and_then(JsonValue::as_str)
+            {
+                all.push(full.to_string());
+            }
+        }
+        if repos.len() < 100 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(all)
+}
+
+/// Try to fetch `.github/CODEOWNERS` from GitHub for `slug` ("org/repo").
+/// Uses If-None-Match if we have a previous ETag in `cache`.
+/// Updates `cache` with the new ETag (or leaves it on 304).
+fn fetch_remote_codeowners(
+    slug: &str,
+    client: &Client,
+    cache: &mut HashMap<String, String>,
+) -> eyre::Result<Ownership> {
+    // read ex-employees for this org
+    let org = slug.split('/').next().unwrap_or("unknown");
+    let exclude = read_ex_employees(org)?;
+
+    // build the URL
+    let url = format!(
+        "https://api.github.com/repos/{slug}/contents/.github/CODEOWNERS",
+        slug = slug
+    );
+    let mut req = client.get(&url);
+    if let Some(etag) = cache.get(slug) {
+        req = req.header("If-None-Match", etag);
+    }
+
+    let resp = req.send()?.error_for_status()?;
+    match resp.status() {
+        reqwest::StatusCode::NOT_MODIFIED => {
+            // 304 → no change
+            Ok(Ownership::Present(BTreeMap::new()))
+        }
+
+        reqwest::StatusCode::OK => {
+            // update ETag
+            if let Some(new_etag) = resp.headers().get("etag") {
+                cache.insert(slug.to_string(), new_etag.to_str()?.to_string());
+            }
+
+            // parse base64-encoded content
+            let json: JsonValue = resp.json()?;
+            let content_b64 = json
+                .get("content")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| eyre::eyre!("no content field in GitHub response"))?;
+            let decoded = STANDARD.decode(content_b64.replace('\n', ""))?;
+            let text = String::from_utf8(decoded)?;
+
+            // build the entries map
+            let re_comment = Regex::new(r"^\s*#")?;
+            let mut entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for raw in text.lines() {
+                let line = raw.trim();
+                if line.is_empty() || re_comment.is_match(line) {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+                let pat = if parts[0] == "*" { "/" } else { parts[0] }.to_string();
+                let mut owners: Vec<String> = parts[1..]
+                    .iter()
+                    .map(|s| s.trim_start_matches('@').to_string())
+                    .collect();
+
+                // filter out any ex-employees
+                owners.retain(|o| !exclude.contains(o));
+
+                entries.insert(pat, owners);
+            }
+
+            if entries.is_empty() {
+                Ok(Ownership::Empty)
+            } else {
+                Ok(Ownership::Present(entries))
+            }
+        }
+
+        status if status == reqwest::StatusCode::NOT_FOUND => {
+            // 404 → no CODEOWNERS
+            Ok(Ownership::Missing)
+        }
+
+        other => {
+            eyre::bail!("GitHub returned {} for {}", other, slug);
+        }
+    }
+}
+
+/// Given a slug, its fetched Ownership, and the set of ex-employees to exclude,
+/// produce a Repo (or None if filtered out).
+fn try_build_repo(
+    slug: &str,
+    ownership: Ownership,
+    exclude: &BTreeSet<String>,
+) -> Result<Option<Repo>> {
+    // For “present” entries, we need to filter out any owners who are ex-employees.
+    // Then we build the YAML mapping and decide status.
+    let (status, mapping) = match ownership {
+        Ownership::Missing => {
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::String("MISSING_CODEOWNERS".into()),
+            );
+            ("unowned".to_string(), m)
+        }
+        Ownership::Empty => {
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::String("EMPTY_CODEOWNERS".into()),
+            );
+            ("unowned".to_string(), m)
+        }
+        Ownership::Present(mut entries) => {
+            // 1) Remove any @owner who is in the ex-employees list
+            for owners in entries.values_mut() {
+                owners.retain(|o| !exclude.contains(o));
+            }
+
+            // 2) Build the YAML mapping exactly as before
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::Mapping(build_repo_mapping(entries.clone(), BTreeSet::new())),
+            );
+
+            // 3) Decide status: if there are no UNOWNED paths, mark as "owned"
+            let has_unowned = matches!(
+                m.get(&Value::String("paths".into())),
+                Some(Value::Mapping(pm)) if pm.values().any(|v| matches!(v, Value::String(s) if s == "UNOWNED"))
+            );
+            let computed_status = if has_unowned { "partial" } else { "owned" };
+
+            (computed_status.to_string(), m)
+        }
+    };
+
+    Ok(Some(Repo {
+        slug: slug.to_string(),
+        status,
+        value: Value::Mapping(mapping),
+    }))
 }
