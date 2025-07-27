@@ -1,4 +1,5 @@
 use clap::Parser;
+use common::repo::RepoDiscovery;
 use eyre::{Context, Result};
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
@@ -57,12 +58,13 @@ fn main() -> Result<()> {
         Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
     };
 
-    let repo_dirs = find_repo_paths(&cli.paths)
+    let discovery = RepoDiscovery::new(cli.paths);
+    let repos = discovery.discover()
         .context("failed to scan for repositories")?;
 
-    let results: Vec<Repo> = repo_dirs
+    let results: Vec<Repo> = repos
         .par_iter()
-        .filter_map(|root_path| match try_process_repo(root_path, &filter_set) {
+        .filter_map(|repo_info| match try_process_repo(repo_info, &filter_set) {
             Ok(Some((slug, status, mapping))) => Some(Repo {
                 slug,
                 status,
@@ -70,7 +72,7 @@ fn main() -> Result<()> {
             }),
             Ok(None) => None,
             Err(err) => {
-                eprintln!("❌ {}: {}", root_path.display(), err);
+                eprintln!("❌ {}: {}", repo_info.path.display(), err);
                 None
             }
         })
@@ -109,53 +111,13 @@ fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
     Ok(set)
 }
 
-/// Finds all Git repositories under the given paths:
-/// - If a path itself has a `.git` folder, it’s treated as a repo root.
-/// - Otherwise it scans first-level subdirectories for `.git`.
-/// - For any first-level subdirectory that isn’t a repo, it also scans its immediate children,
-///   to pick up structures like `./org/<repo>`.
-fn find_repo_paths(paths: &[String]) -> eyre::Result<Vec<PathBuf>> {
-    let mut repos = Vec::new();
-
-    for p in paths {
-        let pb = PathBuf::from(p);
-
-        if pb.join(".git").is_dir() {
-            repos.push(pb.clone());
-            continue;
-        }
-
-        if pb.is_dir() {
-            for entry in fs::read_dir(&pb).context("reading directory")? {
-                let entry = entry?;
-                let child = entry.path();
-
-                if child.join(".git").is_dir() {
-                    repos.push(child.clone());
-                    continue;
-                }
-
-                if child.is_dir() {
-                    for subentry in fs::read_dir(&child).context("reading subdirectory")? {
-                        let subentry = subentry?;
-                        let sub = subentry.path();
-                        if sub.join(".git").is_dir() {
-                            repos.push(sub);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(repos)
-}
 
 fn try_process_repo(
-    root_path: &PathBuf,
+    repo_info: &common::repo::RepoInfo,
     filter_set: &Option<BTreeSet<String>>,
 ) -> Result<Option<(String, String, Mapping)>> {
-    let (repo_root, slug) = find_repo_root_and_slug(root_path.to_str().unwrap())?;
+    let repo_root = &repo_info.path;
+    let slug = &repo_info.slug;
     let exclude = read_ex_employees(&slug.split('/').next().unwrap_or("unknown"))?;
 
     let (status, mapping, _) = match load_ownership(&repo_root)? {
@@ -212,7 +174,7 @@ fn try_process_repo(
         }
     }
 
-    Ok(Some((slug, status, mapping)))
+    Ok(Some((slug.clone(), status, mapping)))
 }
 
 /// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
@@ -248,30 +210,6 @@ fn get_top_authors(
         }
     }
     Ok(authors)
-}
-
-/// Finds the repo root (via `git rev-parse`) and parses `origin` → `org/repo`.
-fn find_repo_root_and_slug(path_str: &str) -> Result<(PathBuf, String)> {
-    let repo_dir = PathBuf::from(path_str);
-    let root = Command::new("git")
-        .current_dir(&repo_dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("git rev-parse failed")?;
-    if !root.status.success() {
-        eyre::bail!("Not inside a Git repository at '{}'", path_str);
-    }
-    let repo_root = PathBuf::from(String::from_utf8(root.stdout)?.trim_end().to_string());
-
-    let url_out = Command::new("git")
-        .current_dir(&repo_dir)
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .context("git remote get-url failed")?;
-    let url = String::from_utf8(url_out.stdout)?.trim().to_string();
-    let slug = parse_slug(&url).unwrap_or_else(|| "unknown/unknown".into());
-
-    Ok((repo_root, slug))
 }
 
 /// Loads and parses `.github/CODEOWNERS`, classifying Missing, Empty, or Present(entries).
@@ -496,16 +434,6 @@ fn print_detailed(entries: &[&Repo]) {
     println!("Matched {} repos", entries.len());
 }
 
-/// Parses GitHub origin URLs into `org/repo`, supporting both SSH and HTTPS.
-fn parse_slug(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        Some(rest.trim_end_matches(".git").to_string())
-    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
-        Some(rest.trim_end_matches(".git").to_string())
-    } else {
-        None
-    }
-}
 
 /// Heuristic: treat certain extensions and filenames as “code”.
 fn is_code_file(path: &Path) -> bool {
@@ -522,4 +450,114 @@ fn is_code_file(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    use std::process::Command;
+
+    fn create_test_repo_with_codeowners(temp_dir: &TempDir, repo_name: &str, codeowners_content: Option<&str>) -> std::path::PathBuf {
+        let repo_path = temp_dir.path().join(repo_name);
+        fs::create_dir_all(&repo_path).unwrap();
+
+        // Initialize git repo
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["init"])
+            .output()
+            .unwrap();
+
+        // Add a remote origin
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["remote", "add", "origin", "git@github.com:testorg/testrepo.git"])
+            .output()
+            .unwrap();
+
+        // Create .github directory and CODEOWNERS if content provided
+        if let Some(content) = codeowners_content {
+            fs::create_dir_all(repo_path.join(".github")).unwrap();
+            fs::write(repo_path.join(".github/CODEOWNERS"), content).unwrap();
+        }
+
+        repo_path
+    }
+
+    #[test]
+    fn test_repo_discovery_integration() {
+        let temp_dir = TempDir::new().unwrap();
+        let _repo1 = create_test_repo_with_codeowners(&temp_dir, "repo1", None);
+        let _repo2 = create_test_repo_with_codeowners(&temp_dir, "repo2", Some("* @owner1"));
+
+        let discovery = RepoDiscovery::new(vec![temp_dir.path().to_string_lossy().to_string()]);
+        let repos = discovery.discover().unwrap();
+
+        assert_eq!(repos.len(), 2);
+        assert!(repos.iter().any(|r| r.path.file_name().unwrap() == "repo1"));
+        assert!(repos.iter().any(|r| r.path.file_name().unwrap() == "repo2"));
+        assert!(repos.iter().all(|r| r.slug == "testorg/testrepo"));
+    }
+
+    #[test]
+    fn test_try_process_repo_missing_codeowners() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = create_test_repo_with_codeowners(&temp_dir, "test_repo", None);
+
+        let repo_info = common::repo::RepoInfo::new(repo_path, "testorg/testrepo".to_string());
+        let result = try_process_repo(&repo_info, &None).unwrap();
+
+        assert!(result.is_some());
+        let (slug, status, _mapping) = result.unwrap();
+        assert_eq!(slug, "testorg/testrepo");
+        assert_eq!(status, "unowned");
+    }
+
+    #[test]
+    fn test_try_process_repo_with_codeowners() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = create_test_repo_with_codeowners(&temp_dir, "test_repo", Some("* @owner1\n/docs/ @docs-team"));
+
+        let repo_info = common::repo::RepoInfo::new(repo_path, "testorg/testrepo".to_string());
+        let result = try_process_repo(&repo_info, &None).unwrap();
+
+        assert!(result.is_some());
+        let (slug, status, _mapping) = result.unwrap();
+        assert_eq!(slug, "testorg/testrepo");
+        // Status depends on whether there are unowned files, but should not be "unowned"
+        assert_ne!(status, "unowned");
+    }
+
+    #[test]
+    fn test_try_process_repo_with_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = create_test_repo_with_codeowners(&temp_dir, "test_repo", None);
+
+        let repo_info = common::repo::RepoInfo::new(repo_path, "testorg/testrepo".to_string());
+        let filter_set = Some(["owned"].iter().map(|s| s.to_string()).collect());
+        let result = try_process_repo(&repo_info, &filter_set).unwrap();
+
+        // Should return None because repo is "unowned" but filter only wants "owned"
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_ex_employees() {
+        // Test that the function handles missing config gracefully
+        let result = read_ex_employees("nonexistent-org").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_is_code_file() {
+        assert!(is_code_file(std::path::Path::new("test.py")));
+        assert!(is_code_file(std::path::Path::new("test.js")));
+        assert!(is_code_file(std::path::Path::new("test.ts")));
+        assert!(is_code_file(std::path::Path::new("Dockerfile")));
+        assert!(is_code_file(std::path::Path::new("Makefile")));
+        assert!(!is_code_file(std::path::Path::new("test.txt")));
+        assert!(!is_code_file(std::path::Path::new("README.md")));
+    }
 }

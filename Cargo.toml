@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "common",
   "clone",
   "reposlug",
   "filter-ref",
@@ -13,7 +14,9 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-clap = { version = "4.5.40", features = ["derive"] }
+clap = { version = "4.5.41", features = ["derive"] }
 env_logger = "0.11.8"
 eyre = "0.6.12"
 log = "0.4.27"
+git2 = "0.20.2"
+common = { path = "common" }

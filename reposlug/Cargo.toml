@@ -9,7 +9,6 @@ clap = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-git2 = "0.18.3"
+git2 = { workspace = true }
 regex = "1.11.1"
 url = "2.5.4"
-

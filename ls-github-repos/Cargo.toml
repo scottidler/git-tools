@@ -10,7 +10,7 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
-reqwest = { version = "0.12.20", features = ["json"] }
-serde_json = "1.0.140"
+reqwest = { version = "0.12.22", features = ["json"] }
+serde_json = "1.0.141"
 shellexpand = "3.1.1"
-tokio = { version = "1.45.1", features = ["full"] }
+tokio = { version = "1.47.0", features = ["full"] }
