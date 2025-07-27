@@ -1,4 +1,6 @@
 use clap::Parser;
+use common::repo::RepoDiscovery;
+use common::parallel::ParallelExecutor;
 use env_logger;
 use eyre::{Result, Context};
 use log::debug;
@@ -17,13 +19,20 @@ mod built_info {
 #[command(name = "stale-branches", about = "Generate a YAML report of stale branches.")]
 #[command(version = built_info::GIT_DESCRIBE)]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
-#[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(help = "Number of days to consider a branch stale.")]
     days: i64,
 
     #[arg(long, help = "Git reference to check.", default_value = "refs/remotes/origin")]
     ref_: String,
+
+    /// Show detailed output (full YAML-style listing)
+    #[arg(short = 'd', long = "detailed")]
+    detailed: bool,
+
+    /// One or more paths to Git repos (defaults to current directory)
+    #[arg(value_name = "PATH", default_values = &["."], num_args = 0..)]
+    paths: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -36,20 +45,251 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Cli::parse();
 
-    Command::new("git")
-        .args(["fetch", "origin", "--prune"])
-        .output()
-        .wrap_err("Failed to prune local cache of git branches")?;
+    // Discover repositories
+    let discovery = RepoDiscovery::new(args.paths);
+    let repos = discovery.discover()
+        .context("failed to scan for repositories")?;
 
-    let branches = get_stale_branches(args.days, &args.ref_)?;
-    generate_yaml(&branches)?;
+    // Process each repository in parallel
+    let executor = ParallelExecutor::new(repos);
+    let repo_detailed_data: Vec<(String, Vec<(String, i64, String)>)> = executor.execute(|repo_info| {
+        debug!("Processing repo: {} ({})", repo_info.slug, repo_info.path.display());
+
+        // Query stale branches for this repository
+        match get_stale_branches_for_repo(args.days, &args.ref_, &repo_info.path) {
+            Ok(branch_list) => {
+                if !branch_list.is_empty() {
+                    Ok(Some((repo_info.slug.clone(), branch_list)))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    });
+
+    if args.detailed {
+        generate_full_yaml(&repo_detailed_data)?;
+    } else {
+        print_hierarchical_summary(&repo_detailed_data);
+    }
 
     Ok(())
 }
 
-fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)>> {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_cli_parsing_with_paths() {
+        let cli = Cli::parse_from(&["ls-stale-branches", "30", "path1", "path2"]);
+        assert_eq!(cli.days, 30);
+        assert_eq!(cli.paths, vec!["path1", "path2"]);
+        assert_eq!(cli.detailed, false);
+        assert_eq!(cli.ref_, "refs/remotes/origin");
+    }
+
+    #[test]
+    fn test_cli_parsing_with_detailed_flag() {
+        // Test with detailed flag
+        let cli = Cli::parse_from(&["ls-stale-branches", "-d", "45"]);
+        assert_eq!(cli.days, 45);
+        assert_eq!(cli.detailed, true);
+
+        // Test default (no detailed flag)
+        let cli = Cli::parse_from(&["ls-stale-branches", "45"]);
+        assert_eq!(cli.detailed, false);
+    }
+
+    #[test]
+    fn test_author_branches_structure() {
+        let branches = AuthorBranches {
+            branches: vec![
+                [("feature-branch".to_string(), 10)].iter().cloned().collect(),
+                [("bugfix-branch".to_string(), 20)].iter().cloned().collect(),
+            ],
+            count: 2,
+        };
+
+        assert_eq!(branches.count, 2);
+        assert_eq!(branches.branches.len(), 2);
+    }
+
+    #[test]
+    fn test_print_hierarchical_summary_empty() {
+        let repo_data: Vec<(String, Vec<(String, i64, String)>)> = vec![];
+
+        // Should not panic with empty data
+        print_hierarchical_summary(&repo_data);
+    }
+
+    #[test]
+    fn test_print_hierarchical_summary_with_data() {
+        let repo_data = vec![
+            ("test/repo1".to_string(), vec![
+                ("feature-branch".to_string(), 10, "user1".to_string()),
+                ("bugfix-branch".to_string(), 15, "user2".to_string()),
+            ]),
+        ];
+
+        // Should not panic with valid data
+        print_hierarchical_summary(&repo_data);
+    }
+
+    #[test]
+    fn test_max_age_calculation() {
+        // Test data that mimics get_stale_branches_for_repo output: (branch, age, author)
+        let branch_list = vec![
+            ("branch1".to_string(), 10, "user1".to_string()),
+            ("branch2".to_string(), 25, "user2".to_string()),
+            ("branch3".to_string(), 15, "user1".to_string()),
+        ];
+
+        // Test max age calculation
+        let max_age = branch_list.iter().map(|(_, age, _)| *age).max().unwrap_or(0);
+        assert_eq!(max_age, 25);
+
+        // Test count
+        assert_eq!(branch_list.len(), 3);
+    }
+
+    #[test]
+    fn test_parallel_executor_integration() {
+        // Test that ParallelExecutor works with RepoInfo
+        use common::repo::RepoInfo;
+
+        let repos = vec![
+            RepoInfo::new(PathBuf::from("/test1"), "owner/repo1".to_string()),
+            RepoInfo::new(PathBuf::from("/test2"), "owner/repo2".to_string()),
+        ];
+
+        let executor = ParallelExecutor::new(repos);
+        let results: Vec<String> = executor.execute(|repo_info| {
+            // Simple test function that returns the repo slug
+            Ok(Some(repo_info.slug.clone()))
+        });
+
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&"owner/repo1".to_string()));
+        assert!(results.contains(&"owner/repo2".to_string()));
+    }
+
+    #[test]
+    fn test_repo_discovery_integration() {
+        // Test that RepoDiscovery integration works
+        let discovery = RepoDiscovery::new(vec![".".to_string()]);
+        let result = discovery.discover();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_full_yaml_with_data() {
+        let repo_data = vec![
+            ("test/repo1".to_string(), vec![
+                ("feature-branch".to_string(), 10, "user1".to_string()),
+                ("bugfix-branch".to_string(), 15, "user2".to_string()),
+            ]),
+        ];
+
+        let result = generate_full_yaml(&repo_data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_branch_sorting_by_days() {
+        use std::collections::HashMap;
+
+        // Test data with multiple branches per author, unsorted
+        let repo_data = vec![
+            ("test/repo1".to_string(), vec![
+                ("old-branch".to_string(), 30, "user1".to_string()),
+                ("newer-branch".to_string(), 10, "user1".to_string()),
+                ("oldest-branch".to_string(), 50, "user1".to_string()),
+                ("middle-branch".to_string(), 20, "user1".to_string()),
+                ("single-branch".to_string(), 15, "user2".to_string()),
+            ]),
+        ];
+
+        // Manually run the sorting logic to test it
+        let mut repo_dict: HashMap<String, HashMap<String, AuthorBranches>> = HashMap::new();
+
+        for (repo_slug, branch_list) in &repo_data {
+            // Group branches by author first
+            let mut author_branches: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+
+            for (branch, days, author) in branch_list {
+                author_branches
+                    .entry(author.clone())
+                    .or_insert_with(Vec::new)
+                    .push((branch.clone(), *days));
+            }
+
+            // Now create the authors_dict with sorted branches
+            let mut authors_dict: HashMap<String, AuthorBranches> = HashMap::new();
+
+            for (author, mut branches) in author_branches {
+                // Sort branches by days (descending - oldest first)
+                branches.sort_by(|a, b| b.1.cmp(&a.1));
+
+                let branch_maps: Vec<HashMap<String, i64>> = branches
+                    .into_iter()
+                    .map(|(branch, days)| HashMap::from([(branch, days)]))
+                    .collect();
+
+                let count = branch_maps.len();
+                authors_dict.insert(author, AuthorBranches {
+                    branches: branch_maps,
+                    count,
+                });
+            }
+
+            repo_dict.insert(repo_slug.clone(), authors_dict);
+        }
+
+        // Verify user1's branches are sorted correctly (descending by days)
+        let user1_branches = &repo_dict["test/repo1"]["user1"].branches;
+        assert_eq!(user1_branches.len(), 4);
+
+        // Extract the days values to verify sorting
+        let days: Vec<i64> = user1_branches.iter()
+            .map(|branch_map| *branch_map.values().next().unwrap())
+            .collect();
+
+        // Should be sorted: [50, 30, 20, 10] (oldest first)
+        assert_eq!(days, vec![50, 30, 20, 10]);
+
+        // Verify the branch names are in the correct order
+        let branch_names: Vec<String> = user1_branches.iter()
+            .map(|branch_map| branch_map.keys().next().unwrap().clone())
+            .collect();
+
+        assert_eq!(branch_names, vec![
+            "oldest-branch".to_string(),
+            "old-branch".to_string(),
+            "middle-branch".to_string(),
+            "newer-branch".to_string()
+        ]);
+
+        // Verify user2 has single branch
+        let user2_branches = &repo_dict["test/repo1"]["user2"].branches;
+        assert_eq!(user2_branches.len(), 1);
+        assert_eq!(*user2_branches[0].values().next().unwrap(), 15);
+    }
+}
+
+fn get_stale_branches_for_repo(days: i64, ref_: &str, repo_path: &std::path::Path) -> Result<Vec<(String, i64, String)>> {
+    // First, fetch and prune branches for this repository
+    Command::new("git")
+        .args(["fetch", "origin", "--prune"])
+        .current_dir(repo_path)
+        .output()
+        .wrap_err("Failed to prune local cache of git branches")?;
+
     let output = Command::new("git")
         .args(["for-each-ref", "--sort=-committerdate", ref_, "--format=%(committerdate:short) %(refname:short) %(committername)"])
+        .current_dir(repo_path)
         .output()
         .wrap_err("Failed to execute git command")?;
 
@@ -81,20 +321,71 @@ fn get_stale_branches(days: i64, ref_: &str) -> Result<Vec<(String, i64, String)
     Ok(branches)
 }
 
-fn generate_yaml(branches: &[(String, i64, String)]) -> Result<()> {
-    let mut authors_dict: HashMap<String, AuthorBranches> = HashMap::new();
+/// Print hierarchical summary: repo -> user (count, max)
+fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]) {
+    for (repo_slug, branch_list) in repo_data {
+        println!("{}:", repo_slug);
 
-    for (branch, days, author) in branches {
-        authors_dict
-            .entry(author.clone())
-            .or_insert_with(|| AuthorBranches { branches: vec![], count: 0 })
-            .branches
-            .push(HashMap::from([(branch.clone(), *days)]));
-        authors_dict.get_mut(author).unwrap().count += 1;
+        // Group branches by author and calculate count/max for each
+        let mut author_stats: HashMap<String, (usize, i64)> = HashMap::new();
+
+        for (_, days, author) in branch_list {
+            let entry = author_stats.entry(author.clone()).or_insert((0, 0));
+            entry.0 += 1; // count
+            entry.1 = entry.1.max(*days); // max age
+        }
+
+        // Sort authors by max age (descending) for consistent output
+        let mut sorted_authors: Vec<_> = author_stats.iter().collect();
+        sorted_authors.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+
+        for (author, (count, max_age)) in sorted_authors {
+            println!("  {}: ({}, {})", author, count, max_age);
+        }
+        println!(); // Empty line between repos
+    }
+}
+
+/// Generate full YAML with individual branches (detailed output)
+fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Result<()> {
+    let mut repo_dict: HashMap<String, HashMap<String, AuthorBranches>> = HashMap::new();
+
+    for (repo_slug, branch_list) in repo_data {
+        // Group branches by author first
+        let mut author_branches: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+
+        for (branch, days, author) in branch_list {
+            author_branches
+                .entry(author.clone())
+                .or_insert_with(Vec::new)
+                .push((branch.clone(), *days));
+        }
+
+        // Now create the authors_dict with sorted branches
+        let mut authors_dict: HashMap<String, AuthorBranches> = HashMap::new();
+
+        for (author, mut branches) in author_branches {
+            // Sort branches by days (descending - oldest first)
+            branches.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let branch_maps: Vec<HashMap<String, i64>> = branches
+                .into_iter()
+                .map(|(branch, days)| HashMap::from([(branch, days)]))
+                .collect();
+
+            let count = branch_maps.len();
+            authors_dict.insert(author, AuthorBranches {
+                branches: branch_maps,
+                count,
+            });
+        }
+
+        repo_dict.insert(repo_slug.clone(), authors_dict);
     }
 
-    let yaml_data = serde_yaml::to_string(&authors_dict).wrap_err("Failed to serialize data to YAML")?;
-    io::stdout().write_all(yaml_data.as_bytes()).wrap_err("Failed to write YAML to stdout")?;
-
+    let yaml_data = serde_yaml::to_string(&repo_dict)
+        .wrap_err("Failed to serialize data to YAML")?;
+    io::stdout().write_all(yaml_data.as_bytes())
+        .wrap_err("Failed to write YAML to stdout")?;
     Ok(())
 }

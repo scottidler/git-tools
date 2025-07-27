@@ -160,15 +160,33 @@ fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Res
     let mut repo_dict: HashMap<String, HashMap<String, AuthorPRs>> = HashMap::new();
 
     for (repo_slug, pr_list) in repo_data {
-        let mut authors_dict: HashMap<String, AuthorPRs> = HashMap::new();
+        // Group PRs by author first
+        let mut author_prs: HashMap<String, Vec<(String, i64)>> = HashMap::new();
 
         for (pr_title, days, author) in pr_list {
-            authors_dict
+            author_prs
                 .entry(author.clone())
-                .or_insert_with(|| AuthorPRs { prs: vec![], count: 0 })
-                .prs
-                .push(HashMap::from([(pr_title.clone(), *days)]));
-            authors_dict.get_mut(author).unwrap().count += 1;
+                .or_insert_with(Vec::new)
+                .push((pr_title.clone(), *days));
+        }
+
+        // Now create the authors_dict with sorted PRs
+        let mut authors_dict: HashMap<String, AuthorPRs> = HashMap::new();
+
+        for (author, mut prs) in author_prs {
+            // Sort PRs by days (descending - oldest first)
+            prs.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let pr_maps: Vec<HashMap<String, i64>> = prs
+                .into_iter()
+                .map(|(pr_title, days)| HashMap::from([(pr_title, days)]))
+                .collect();
+
+            let count = pr_maps.len();
+            authors_dict.insert(author, AuthorPRs {
+                prs: pr_maps,
+                count,
+            });
         }
 
         repo_dict.insert(repo_slug.clone(), authors_dict);
@@ -364,7 +382,7 @@ mod tests {
         assert!(results.contains(&"owner/repo2".to_string()));
     }
 
-    #[test]
+        #[test]
     fn test_get_stale_prs_blocking() {
         // Test that get_stale_prs works as a blocking function
         // This will fail if gh is not installed, but that's expected in CI
@@ -372,6 +390,87 @@ mod tests {
 
         // We expect this to fail (repo doesn't exist), but it should be a proper Result
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pr_sorting_by_days() {
+        use std::collections::HashMap;
+
+        // Test data with multiple PRs per author, unsorted
+        let repo_data = vec![
+            ("test/repo1".to_string(), vec![
+                ("Old PR (pr 100)".to_string(), 30, "user1".to_string()),
+                ("Newer PR (pr 200)".to_string(), 10, "user1".to_string()),
+                ("Oldest PR (pr 300)".to_string(), 50, "user1".to_string()),
+                ("Middle PR (pr 400)".to_string(), 20, "user1".to_string()),
+                ("Single PR (pr 500)".to_string(), 15, "user2".to_string()),
+            ]),
+        ];
+
+        // Manually run the sorting logic to test it
+        let mut repo_dict: HashMap<String, HashMap<String, AuthorPRs>> = HashMap::new();
+
+        for (repo_slug, pr_list) in &repo_data {
+            // Group PRs by author first
+            let mut author_prs: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+
+            for (pr_title, days, author) in pr_list {
+                author_prs
+                    .entry(author.clone())
+                    .or_insert_with(Vec::new)
+                    .push((pr_title.clone(), *days));
+            }
+
+            // Now create the authors_dict with sorted PRs
+            let mut authors_dict: HashMap<String, AuthorPRs> = HashMap::new();
+
+            for (author, mut prs) in author_prs {
+                // Sort PRs by days (descending - oldest first)
+                prs.sort_by(|a, b| b.1.cmp(&a.1));
+
+                let pr_maps: Vec<HashMap<String, i64>> = prs
+                    .into_iter()
+                    .map(|(pr_title, days)| HashMap::from([(pr_title, days)]))
+                    .collect();
+
+                let count = pr_maps.len();
+                authors_dict.insert(author, AuthorPRs {
+                    prs: pr_maps,
+                    count,
+                });
+            }
+
+            repo_dict.insert(repo_slug.clone(), authors_dict);
+        }
+
+        // Verify user1's PRs are sorted correctly (descending by days)
+        let user1_prs = &repo_dict["test/repo1"]["user1"].prs;
+        assert_eq!(user1_prs.len(), 4);
+
+        // Extract the days values to verify sorting
+        let days: Vec<i64> = user1_prs.iter()
+            .map(|pr_map| *pr_map.values().next().unwrap())
+            .collect();
+
+        // Should be sorted: [50, 30, 20, 10] (oldest first)
+        assert_eq!(days, vec![50, 30, 20, 10]);
+
+        // Verify the PR titles are in the correct order
+        let pr_titles: Vec<String> = user1_prs.iter()
+            .map(|pr_map| pr_map.keys().next().unwrap().clone())
+            .collect();
+
+        assert_eq!(pr_titles, vec![
+            "Oldest PR (pr 300)".to_string(),
+            "Old PR (pr 100)".to_string(),
+            "Middle PR (pr 400)".to_string(),
+            "Newer PR (pr 200)".to_string()
+        ]);
+
+        // Verify user2 has single PR
+        let user2_prs = &repo_dict["test/repo1"]["user2"].prs;
+        assert_eq!(user2_prs.len(), 1);
+        assert_eq!(*user2_prs[0].values().next().unwrap(), 15);
     }
 
 }
