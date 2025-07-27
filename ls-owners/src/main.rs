@@ -1,5 +1,6 @@
 use clap::Parser;
 use common::repo::RepoDiscovery;
+use common::parallel::ParallelExecutor;
 use eyre::{Context, Result};
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
@@ -9,7 +10,6 @@ use std::{
     path::{Path, PathBuf},
     process::{exit, Command},
 };
-use rayon::prelude::*;
 use colored::Colorize;
 
 const TOP_AUTHORS: usize = 5;
@@ -62,21 +62,18 @@ fn main() -> Result<()> {
     let repos = discovery.discover()
         .context("failed to scan for repositories")?;
 
-    let results: Vec<Repo> = repos
-        .par_iter()
-        .filter_map(|repo_info| match try_process_repo(repo_info, &filter_set) {
-            Ok(Some((slug, status, mapping))) => Some(Repo {
+    let executor = ParallelExecutor::new(repos);
+    let results: Vec<Repo> = executor.execute(|repo_info| {
+        match try_process_repo(repo_info, &filter_set) {
+            Ok(Some((slug, status, mapping))) => Ok(Some(Repo {
                 slug,
                 status,
                 value: Value::Mapping(mapping),
-            }),
-            Ok(None) => None,
-            Err(err) => {
-                eprintln!("❌ {}: {}", repo_info.path.display(), err);
-                None
-            }
-        })
-        .collect();
+            })),
+            Ok(None) => Ok(None),
+            Err(err) => Err(err),
+        }
+    });
 
     let sorted = sorted_entries(&results);
 
