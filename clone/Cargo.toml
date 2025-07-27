@@ -9,4 +9,5 @@ clap = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+common = { workspace = true }
 ini = "1.3.0"

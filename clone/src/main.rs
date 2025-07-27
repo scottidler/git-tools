@@ -5,23 +5,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::Parser;
-use eyre::{Result, eyre, WrapErr};
-use log::{debug, warn};
-use env_logger;
+use common::{Result, eyre, debug, warn};
+use common::include_git_describe;
+use eyre::WrapErr;
 use ini::ini;
+
+// Use the shared macro for build info
+include_git_describe!();
 
 const REMOTE_URLS: [&str; 2] = [
     "ssh://git@github.com",
     "https://github.com",
 ];
 
-mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "clone", about = "Clones repositories with optional versioning and mirroring")]
-#[command(version = built_info::GIT_DESCRIBE)]
+#[command(version = GIT_DESCRIBE)]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 struct Cli {
@@ -48,6 +47,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Initialize logging (could be enhanced to use common::cli::init_logging)
     env_logger::init();
 
     let cli = Cli::parse();
