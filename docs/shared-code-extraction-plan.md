@@ -36,7 +36,7 @@ This document outlines a phased approach to extract common repository discovery 
 **Dependencies to add to common:**
 - `eyre` (error handling)
 - `regex` (URL parsing)
-- `git2` (git operations) 
+- `git2` (git operations)
 - `serde` (serialization for RepoInfo)
 
 ### 1.2 Extract Core Types
@@ -77,9 +77,9 @@ pub struct RepoDiscovery {
 
 impl RepoDiscovery {
     pub fn new(paths: Vec<String>) -> Self { ... }
-    
+
     pub fn discover(&self) -> Result<Vec<RepoInfo>> { ... }
-    
+
     // Private helper methods
     fn is_git_repo<P: AsRef<Path>>(path: P) -> bool { ... }
     fn scan_directory<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>> { ... }
@@ -242,7 +242,7 @@ common/
 ## Future Phases (Not in Scope)
 
 - **Phase 4:** Migrate `ls-stale-prs` to use shared repo discovery
-- **Phase 5:** Migrate `ls-stale-branches` to use shared repo discovery  
+- **Phase 5:** Migrate `ls-stale-branches` to use shared repo discovery
 - **Phase 6:** Extract common CLI patterns
 - **Phase 7:** Extract common output formatting
 
@@ -253,4 +253,4 @@ common/
 - **Test-driven:** Write tests before refactoring
 - **Documentation-driven:** Document the extracted API as it's created
 
-This phased approach ensures a safe, tested extraction of shared functionality while maintaining the reliability and behavior of existing tools. 
+This phased approach ensures a safe, tested extraction of shared functionality while maintaining the reliability and behavior of existing tools.

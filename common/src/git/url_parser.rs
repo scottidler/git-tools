@@ -17,17 +17,17 @@ pub fn parse_git_url(url: &str) -> Option<String> {
 /// Get the repository slug from a path by querying git remote
 pub fn get_repo_slug_from_path<P: AsRef<Path>>(path: P) -> Result<String> {
     let repo_dir = path.as_ref();
-    
+
     let url_out = Command::new("git")
         .current_dir(repo_dir)
         .args(["remote", "get-url", "origin"])
         .output()
         .context("git remote get-url failed")?;
-    
+
     if !url_out.status.success() {
         eyre::bail!("Failed to get git remote URL from {}", repo_dir.display());
     }
-    
+
     let url = String::from_utf8(url_out.stdout)?.trim().to_string();
     parse_git_url(&url).ok_or_else(|| eyre::eyre!("Failed to parse git URL: {}", url))
 }
@@ -71,4 +71,4 @@ mod tests {
         let url = "";
         assert_eq!(parse_git_url(url), None);
     }
-} 
+}

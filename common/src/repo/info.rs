@@ -29,7 +29,7 @@ impl RepoInfo {
 /// Finds the repo root (via `git rev-parse`) and parses `origin` → `org/repo`.
 fn find_repo_root_and_slug<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)> {
     let repo_dir = path.as_ref();
-    
+
     let root = Command::new("git")
         .current_dir(repo_dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -60,8 +60,8 @@ mod tests {
         let path = PathBuf::from("/test/repo");
         let slug = "owner/repo".to_string();
         let info = RepoInfo::new(path.clone(), slug.clone());
-        
+
         assert_eq!(info.path, path);
         assert_eq!(info.slug, slug);
     }
-} 
+}
