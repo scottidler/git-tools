@@ -28,7 +28,7 @@ struct Repo {
 }
 
 #[derive(Parser)]
-#[command(name = "ls-owners", about = "List CODEOWNERS and detect un-owned code paths")]
+#[command(name = "ls-owners", about = "List CODEOWNERS and detect un-owned code paths", version = env!("GIT_DESCRIBE"))]
 struct Cli {
     /// Only show repos with these statuses: owned, unowned, partial
     #[arg(

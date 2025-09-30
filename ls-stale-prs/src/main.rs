@@ -15,7 +15,7 @@ use std::process::Command;
 #[derive(Parser, Debug)]
 #[command(name = "stale-prs", about = "Generate a YAML report of stale PRs.")]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
-#[command(version)]
+#[command(version = env!("GIT_DESCRIBE"))]
 struct Cli {
     #[arg(help = "Number of days to consider a PR stale.")]
     days: i64,
