@@ -9,14 +9,12 @@ use shellexpand;
 use log::debug;
 use env_logger;
 
-mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
-}
+// Built-in version from build.rs via env!("GIT_DESCRIBE")
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[command(name = "ls-github-repos", about = "list all repos under an org or user")]
-#[command(version = built_info::GIT_DESCRIBE)]
+#[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 struct Cli {

@@ -2,7 +2,7 @@
 name = "clone"
 version = "0.1.13"
 edition = "2021"
-build = "../build.rs"
+build = "build.rs"
 
 [dependencies]
 clap = { workspace = true }

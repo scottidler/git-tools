@@ -8,14 +8,12 @@ use ini::Ini;
 use walkdir::WalkDir;
 use regex::Regex;
 
-mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
-}
+// Built-in version from build.rs via env!("GIT_DESCRIBE")
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[command(name = "ls-git-repos", about = "List all local Git repositories with their GitHub reposlug")]
-#[command(version = built_info::GIT_DESCRIBE)]
+#[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = false)]
 struct Cli {

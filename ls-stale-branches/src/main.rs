@@ -11,13 +11,11 @@ use std::io::{self, Write};
 use std::process::Command;
 use chrono::{Utc, NaiveDate};
 
-mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
-}
+// Built-in version from build.rs via env!("GIT_DESCRIBE")
 
 #[derive(Parser, Debug)]
 #[command(name = "stale-branches", about = "Generate a YAML report of stale branches.")]
-#[command(version = built_info::GIT_DESCRIBE)]
+#[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 struct Cli {
     #[arg(help = "Number of days to consider a branch stale.")]

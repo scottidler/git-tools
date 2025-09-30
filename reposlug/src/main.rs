@@ -3,13 +3,11 @@ use git2::Repository;
 use eyre::{Result, eyre};
 use regex::Regex;
 
-mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/git_describe.rs"));
-}
+// Built-in version from build.rs via env!("GIT_DESCRIBE")
 
 #[derive(Parser, Debug)]
 #[command(name = "reposlug", about = "get the reposlug from the remote origin url")]
-#[command(version = built_info::GIT_DESCRIBE)]
+#[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 struct Args {
     #[clap(short, long)]
