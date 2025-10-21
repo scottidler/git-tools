@@ -82,9 +82,37 @@ fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     std::env::set_current_dir(full_clone_path)
         .wrap_err("Failed to set current directory")?;
 
+    // Check for untracked files
+    let status_output = Command::new("git")
+        .args(&["status", "--porcelain"])
+        .output()
+        .wrap_err("Failed to check git status")?;
+
+    let status_str = String::from_utf8_lossy(&status_output.stdout);
+    let has_untracked = status_str.lines().any(|line| line.starts_with("??"));
+
+    if has_untracked {
+        return Err(eyre!(
+            "Cannot update repository: untracked files present.\n\
+             Please commit, remove, or add them to .gitignore before cloning.\n\
+             Untracked files:\n{}",
+            status_str.lines()
+                .filter(|line| line.starts_with("??"))
+                .map(|line| line.trim_start_matches("?? "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    // Check for uncommitted changes and stash them
+    let has_changes = !status_str.is_empty();
+    if has_changes {
+        git(&["stash", "push", "-m", "Automatic stash by clone tool"], None)?;
+        eprintln!("Note: Uncommitted changes have been stashed. Use 'git stash pop' to restore them.");
+    }
+
     git(&["checkout", revision], None)?;
     git(&["pull"], None)?;
-    git(&["clean", "-xfd"], None)?;
     Ok(())
 }
 
