@@ -1,6 +1,6 @@
 use clap::Parser;
+use eyre::{eyre, Result};
 use git2::Repository;
-use eyre::{Result, eyre};
 use regex::Regex;
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
@@ -59,11 +59,16 @@ fn parse_git_url(url: &str) -> Result<String> {
         [^:/]+                   # Match the host (not capturing)
         :(?P<slug_2>[^/]+/[^/]+?)  # Capture the slug
         (?:\.git)?               # Match the .git extension, if present
-        $"                       // End of line
-    ).map_err(|_| eyre!("Invalid regex pattern"))?;
+        $", // End of line
+    )
+    .map_err(|_| eyre!("Invalid regex pattern"))?;
 
     re.captures(url)
-        .and_then(|caps| caps.name("slug").or_else(|| caps.name("slug_2")).map(|m| m.as_str().to_string()))
+        .and_then(|caps| {
+            caps.name("slug")
+                .or_else(|| caps.name("slug_2"))
+                .map(|m| m.as_str().to_string())
+        })
         .ok_or_else(|| eyre!("Failed to parse URL"))
 }
 
@@ -81,8 +86,12 @@ mod tests {
         ];
 
         for url in urls {
-            assert_eq!(parse_git_url(url).unwrap(), "repo/slug", "URL parsing failed for: {}", url);
+            assert_eq!(
+                parse_git_url(url).unwrap(),
+                "repo/slug",
+                "URL parsing failed for: {}",
+                url
+            );
         }
     }
 }
-

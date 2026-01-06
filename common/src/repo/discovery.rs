@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::collections::HashSet;
-use eyre::{Result, Context};
-use rayon::prelude::*;
 use super::RepoInfo;
+use eyre::{Context, Result};
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Repository discovery utility for finding Git repositories
 pub struct RepoDiscovery {
@@ -99,9 +99,7 @@ impl RepoDiscovery {
         // Report any identifiers that didn't match anything
         for identifier in &repo_identifiers {
             let found = result.iter().any(|repo| {
-                repo.slug == *identifier ||
-                repo.path.to_string_lossy() == *identifier ||
-                repo.slug.contains(identifier)
+                repo.slug == *identifier || repo.path.to_string_lossy() == *identifier || repo.slug.contains(identifier)
             });
 
             if !found {
@@ -119,13 +117,11 @@ impl RepoDiscovery {
         // Process repository paths in parallel
         let repos: Vec<RepoInfo> = repo_paths
             .par_iter()
-            .filter_map(|path| {
-                match RepoInfo::from_path(path) {
-                    Ok(repo_info) => Some(repo_info),
-                    Err(e) => {
-                        eprintln!("❌ {}: {}", path.display(), e);
-                        None
-                    }
+            .filter_map(|path| match RepoInfo::from_path(path) {
+                Ok(repo_info) => Some(repo_info),
+                Err(e) => {
+                    eprintln!("❌ {}: {}", path.display(), e);
+                    None
                 }
             })
             .collect();

@@ -1,6 +1,7 @@
 use clap::Parser;
-use common::repo::RepoDiscovery;
+use colored::Colorize;
 use common::parallel::ParallelExecutor;
+use common::repo::RepoDiscovery;
 use eyre::{Context, Result};
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
@@ -8,9 +9,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{Command, exit},
 };
-use colored::Colorize;
 
 const TOP_AUTHORS: usize = 5;
 
@@ -59,20 +59,17 @@ fn main() -> Result<()> {
     };
 
     let discovery = RepoDiscovery::new(cli.paths);
-    let repos = discovery.discover()
-        .context("failed to scan for repositories")?;
+    let repos = discovery.discover().context("failed to scan for repositories")?;
 
     let executor = ParallelExecutor::new(repos);
-    let results: Vec<Repo> = executor.execute(|repo_info| {
-        match try_process_repo(repo_info, &filter_set) {
-            Ok(Some((slug, status, mapping))) => Ok(Some(Repo {
-                slug,
-                status,
-                value: Value::Mapping(mapping),
-            })),
-            Ok(None) => Ok(None),
-            Err(err) => Err(err),
-        }
+    let results: Vec<Repo> = executor.execute(|repo_info| match try_process_repo(repo_info, &filter_set) {
+        Ok(Some((slug, status, mapping))) => Ok(Some(Repo {
+            slug,
+            status,
+            value: Value::Mapping(mapping),
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(err),
     });
 
     let sorted = sorted_entries(&results);
@@ -83,9 +80,7 @@ fn main() -> Result<()> {
         print_simplified(&sorted);
     }
 
-    let exit_code = results.iter().any(|r| r.status != "owned")
-        .then(|| 1)
-        .unwrap_or(0);
+    let exit_code = if results.iter().any(|r| r.status != "owned") { 1 } else { 0 };
     exit(exit_code);
 }
 
@@ -108,46 +103,38 @@ fn read_ex_employees(org: &str) -> eyre::Result<BTreeSet<String>> {
     Ok(set)
 }
 
-
 fn try_process_repo(
     repo_info: &common::repo::RepoInfo,
     filter_set: &Option<BTreeSet<String>>,
 ) -> Result<Option<(String, String, Mapping)>> {
     let repo_root = &repo_info.path;
     let slug = &repo_info.slug;
-    let exclude = read_ex_employees(&slug.split('/').next().unwrap_or("unknown"))?;
+    let exclude = read_ex_employees(slug.split('/').next().unwrap_or("unknown"))?;
 
-    let (status, mapping, _) = match load_ownership(&repo_root)? {
+    let (status, mapping, _) = match load_ownership(repo_root)? {
         Ownership::Missing => {
             let mut m = Mapping::new();
             m.insert(
                 Value::String("paths".into()),
                 Value::String("MISSING_CODEOWNERS".into()),
             );
-            let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+            let authors = get_top_authors(repo_root, TOP_AUTHORS, &exclude)?;
             let seq = authors.into_iter().map(Value::String).collect();
             m.insert(Value::String("authors".into()), Value::Sequence(seq));
             ("unowned".to_string(), m, true)
         }
         Ownership::Empty => {
             let mut m = Mapping::new();
-            m.insert(
-                Value::String("paths".into()),
-                Value::String("EMPTY_CODEOWNERS".into()),
-            );
-            let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+            m.insert(Value::String("paths".into()), Value::String("EMPTY_CODEOWNERS".into()));
+            let authors = get_top_authors(repo_root, TOP_AUTHORS, &exclude)?;
             let seq = authors.into_iter().map(Value::String).collect();
             m.insert(Value::String("authors".into()), Value::Sequence(seq));
             ("unowned".to_string(), m, true)
         }
         Ownership::Present(entries) => {
-            let code_files = gather_code_files(&repo_root)?;
+            let code_files = gather_code_files(repo_root)?;
             let unowned_dirs = determine_unowned_paths(&entries, &code_files);
-            let computed_status = if unowned_dirs.is_empty() {
-                "owned"
-            } else {
-                "partial"
-            };
+            let computed_status = if unowned_dirs.is_empty() { "owned" } else { "partial" };
             let mut m = Mapping::new();
             m.insert(
                 Value::String("paths".into()),
@@ -156,7 +143,7 @@ fn try_process_repo(
 
             let has_authors = computed_status != "owned";
             if has_authors {
-                let authors = get_top_authors(&repo_root, TOP_AUTHORS, &exclude)?;
+                let authors = get_top_authors(repo_root, TOP_AUTHORS, &exclude)?;
                 let seq = authors.into_iter().map(Value::String).collect();
                 m.insert(Value::String("authors".into()), Value::Sequence(seq));
             }
@@ -165,10 +152,10 @@ fn try_process_repo(
         }
     };
 
-    if let Some(filters) = filter_set {
-        if !filters.contains(&status.to_lowercase()) {
-            return Ok(None);
-        }
+    if let Some(filters) = filter_set
+        && !filters.contains(&status.to_lowercase())
+    {
+        return Ok(None);
     }
 
     Ok(Some((slug.clone(), status, mapping)))
@@ -176,14 +163,10 @@ fn try_process_repo(
 
 /// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
 /// filtering out any whose full name appears in `exclude`.
-fn get_top_authors(
-    repo: &Path,
-    limit: usize,
-    exclude: &BTreeSet<String>,
-) -> Result<Vec<String>> {
+fn get_top_authors(repo: &Path, limit: usize, exclude: &BTreeSet<String>) -> Result<Vec<String>> {
     let output = Command::new("git")
         .current_dir(repo)
-        .args(&["shortlog", "-s", "-n", "--all", "--no-merges"])
+        .args(["shortlog", "-s", "-n", "--all", "--no-merges"])
         .output()
         .context("git shortlog failed")?;
     if !output.status.success() {
@@ -216,8 +199,8 @@ fn load_ownership(root: &Path) -> Result<Ownership> {
         return Ok(Ownership::Missing);
     }
 
-    let content = fs::read_to_string(&codeowners)
-        .wrap_err_with(|| format!("Failed to read {}", codeowners.display()))?;
+    let content =
+        fs::read_to_string(&codeowners).wrap_err_with(|| format!("Failed to read {}", codeowners.display()))?;
     let re_comment = Regex::new(r"^\s*#").unwrap();
     let mut entries = BTreeMap::<String, Vec<String>>::new();
 
@@ -266,21 +249,14 @@ fn gather_code_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 /// Given parsed ownership entries and a list of code files (relative paths),
 /// returns the set of top‐level directories (or `/`) that aren’t covered.
-fn determine_unowned_paths(
-    entries: &BTreeMap<String, Vec<String>>,
-    code_files: &[PathBuf],
-) -> BTreeSet<String> {
+fn determine_unowned_paths(entries: &BTreeMap<String, Vec<String>>, code_files: &[PathBuf]) -> BTreeSet<String> {
     let mut unowned = BTreeSet::new();
     for rel in code_files {
         let s = format!("/{}", rel.to_string_lossy());
         let covered = entries.keys().any(|pat| s.starts_with(pat));
         if !covered {
             let comps: Vec<&str> = s.split('/').filter(|c| !c.is_empty()).collect();
-            let dir = if comps.len() <= 1 {
-                "/".to_string()
-            } else {
-                format!("/{}/", comps[0])
-            };
+            let dir = if comps.len() <= 1 { "/".to_string() } else { format!("/{}/", comps[0]) };
             unowned.insert(dir);
         }
     }
@@ -289,10 +265,7 @@ fn determine_unowned_paths(
 
 /// Builds the `serde_yaml::Mapping` for a repo:
 /// each path → owner(s) or `"UNOWNED"`, in the desired order.
-fn build_repo_mapping(
-    entries: BTreeMap<String, Vec<String>>,
-    unowned: BTreeSet<String>,
-) -> Mapping {
+fn build_repo_mapping(entries: BTreeMap<String, Vec<String>>, unowned: BTreeSet<String>) -> Mapping {
     let mut all_keys: Vec<String> = entries.keys().cloned().collect();
     for dir in &unowned {
         if !entries.contains_key(dir) {
@@ -341,16 +314,12 @@ fn sorted_entries(results: &[Repo]) -> Vec<&Repo> {
         match s {
             "unowned" => 0,
             "partial" => 1,
-            "owned"   => 2,
-            _         => 3,
+            "owned" => 2,
+            _ => 3,
         }
     }
 
-    refs.sort_by(|a, b| {
-        rank(&a.status)
-            .cmp(&rank(&b.status))
-            .then_with(|| a.slug.cmp(&b.slug))
-    });
+    refs.sort_by(|a, b| rank(&a.status).cmp(&rank(&b.status)).then_with(|| a.slug.cmp(&b.slug)));
 
     refs
 }
@@ -361,10 +330,10 @@ fn print_simplified(entries: &[&Repo]) {
 
     for r in entries {
         let colored = match r.status.as_str() {
-            "owned"   => r.status.green().bold(),
+            "owned" => r.status.green().bold(),
             "partial" => r.status.yellow().bold(),
             "unowned" => r.status.red().bold(),
-            other     => other.normal(),
+            other => other.normal(),
         };
         let pad = format!("{:>width$}", colored, width = width);
         println!("{} {}", pad, r.slug);
@@ -377,10 +346,10 @@ fn print_simplified(entries: &[&Repo]) {
 fn print_detailed(entries: &[&Repo]) {
     for r in entries {
         let colored = match r.status.as_str() {
-            "owned"   => r.status.green().bold(),
+            "owned" => r.status.green().bold(),
             "partial" => r.status.yellow().bold(),
             "unowned" => r.status.red().bold(),
-            other     => other.normal(),
+            other => other.normal(),
         };
 
         println!("{} {}:", colored, r.slug);
@@ -390,14 +359,13 @@ fn print_detailed(entries: &[&Repo]) {
                 println!("  {}", s);
             }
             Value::Mapping(m) => {
-                if let Some(Value::Mapping(paths)) = m.get(&Value::String("paths".into())) {
+                if let Some(Value::Mapping(paths)) = m.get(Value::String("paths".into())) {
                     println!("  paths:");
                     for (p, owners) in paths {
                         let path = p.as_str().unwrap_or_default();
                         match owners {
                             Value::Sequence(seq) => {
-                                let list: Vec<&str> =
-                                    seq.iter().filter_map(Value::as_str).collect();
+                                let list: Vec<&str> = seq.iter().filter_map(Value::as_str).collect();
                                 if list.len() == 1 {
                                     println!("    {}: {}", path, list[0]);
                                 } else {
@@ -413,7 +381,7 @@ fn print_detailed(entries: &[&Repo]) {
                         }
                     }
                 }
-                if let Some(Value::Sequence(authors)) = m.get(&Value::String("authors".into())) {
+                if let Some(Value::Sequence(authors)) = m.get(Value::String("authors".into())) {
                     println!("  authors:");
                     for a in authors {
                         if let Some(name) = a.as_str() {
@@ -431,7 +399,6 @@ fn print_detailed(entries: &[&Repo]) {
     println!("Matched {} repos", entries.len());
 }
 
-
 /// Heuristic: treat certain extensions and filenames as “code”.
 fn is_code_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -441,8 +408,7 @@ fn is_code_file(path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()) {
             return matches!(
                 ext.as_str(),
-                "py" | "js" | "jsx" | "ts" | "tsx" | "css"
-                    | "html" | "tf" | "yaml" | "yml" | "toml" | "tpl"
+                "py" | "js" | "jsx" | "ts" | "tsx" | "css" | "html" | "tf" | "yaml" | "yml" | "toml" | "tpl"
             );
         }
     }
@@ -453,10 +419,14 @@ fn is_code_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::TempDir;
     use std::process::Command;
+    use tempfile::TempDir;
 
-    fn create_test_repo_with_codeowners(temp_dir: &TempDir, repo_name: &str, codeowners_content: Option<&str>) -> std::path::PathBuf {
+    fn create_test_repo_with_codeowners(
+        temp_dir: &TempDir,
+        repo_name: &str,
+        codeowners_content: Option<&str>,
+    ) -> std::path::PathBuf {
         let repo_path = temp_dir.path().join(repo_name);
         fs::create_dir_all(&repo_path).unwrap();
 

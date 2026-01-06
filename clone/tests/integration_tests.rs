@@ -88,16 +88,13 @@ fn test_clone_existing_public_repo_succeeds() {
     assert!(
         output.status.success(),
         "Command should succeed for public repo. Stderr: {}, Stdout: {}",
-        stderr, stdout
+        stderr,
+        stdout
     );
 
     // Check that the directory was created and has a .git directory
     let cloned_dir = temp_dir.join("rust-lang/libc");
-    assert!(
-        cloned_dir.exists(),
-        "Cloned directory should exist at {:?}",
-        cloned_dir
-    );
+    assert!(cloned_dir.exists(), "Cloned directory should exist at {:?}", cloned_dir);
     assert!(
         cloned_dir.join(".git").exists(),
         ".git directory should exist in cloned repo"
@@ -180,8 +177,9 @@ fn test_help_command_works() {
     assert!(output.status.success(), "--help should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("repospec"), "Help should mention repospec");
-    assert!(stdout.contains("revision"), "Help should mention revision");
+    let stdout_lower = stdout.to_lowercase();
+    assert!(stdout_lower.contains("repospec"), "Help should mention repospec");
+    assert!(stdout_lower.contains("revision"), "Help should mention revision");
 }
 
 #[test]
@@ -196,6 +194,8 @@ fn test_version_command_works() {
     assert!(output.status.success(), "--version should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("clone") || !stdout.is_empty(), "Version should show something");
+    assert!(
+        stdout.contains("clone") || !stdout.is_empty(),
+        "Version should show something"
+    );
 }
-

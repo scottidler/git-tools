@@ -1,13 +1,10 @@
 use clap::{Parser, ValueEnum};
+use eyre::{Result, eyre};
+use log::debug;
 use reqwest::{Client, header};
 use serde_json::Value;
-use tokio;
-use eyre::{Result, eyre};
-use std::{fs, fmt};
 use std::path::PathBuf;
-use shellexpand;
-use log::debug;
-use env_logger;
+use std::{fmt, fs};
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
@@ -51,10 +48,14 @@ impl RepoType {
 
 impl fmt::Display for RepoType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            RepoType::User => "users",
-            RepoType::Org => "orgs",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                RepoType::User => "users",
+                RepoType::Org => "orgs",
+            }
+        )
     }
 }
 
@@ -99,8 +100,11 @@ async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
     let mut headers = header::HeaderMap::new();
 
     let auth_value = format!("token {}", token);
-    headers.insert("Authorization", header::HeaderValue::from_str(&auth_value)
-        .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?);
+    headers.insert(
+        "Authorization",
+        header::HeaderValue::from_str(&auth_value)
+            .map_err(|e| eyre!("Failed to parse 'Authorization' header value: {}", e))?,
+    );
     headers.insert("User-Agent", header::HeaderValue::from_static("reqwest"));
 
     let user_url = format!("https://api.github.com/users/{}", name);
@@ -126,7 +130,10 @@ async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
         }
     }
 
-    Err(eyre!("'{}' is neither a valid GitHub user nor organization, or your token lacks access.", name))
+    Err(eyre!(
+        "'{}' is neither a valid GitHub user nor organization, or your token lacks access.",
+        name
+    ))
 }
 
 async fn ls_github_repos(
@@ -170,27 +177,18 @@ async fn ls_github_repos(
         }
 
         let response_json: Vec<Value> = serde_json::from_str(&response_text)
-            .map_err(|e| {
-                eyre!(
-                    "Error decoding response body: {}\nRaw response: {}",
-                    e,
-                    response_text
-                )
-            })?;
+            .map_err(|e| eyre!("Error decoding response body: {}\nRaw response: {}", e, response_text))?;
 
         if response_json.is_empty() {
             break;
         }
 
         for repo in response_json {
-            if archived || !repo["archived"].as_bool().unwrap_or(false) {
-                if let (Some(repo_name), Some(created_at)) = (
-                    repo["full_name"].as_str(),
-                    repo["created_at"].as_str(),
-                ) {
-                    let date = created_at[..10].to_string();
-                    repo_data.push((repo_name.to_owned(), date));
-                }
+            if (archived || !repo["archived"].as_bool().unwrap_or(false))
+                && let (Some(repo_name), Some(created_at)) = (repo["full_name"].as_str(), repo["created_at"].as_str())
+            {
+                let date = created_at[..10].to_string();
+                repo_data.push((repo_name.to_owned(), date));
             }
         }
         page += 1;

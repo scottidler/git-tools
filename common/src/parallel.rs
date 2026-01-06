@@ -1,7 +1,7 @@
-use std::sync::Mutex;
+use super::repo::RepoInfo;
 use eyre::Result;
 use rayon::prelude::*;
-use super::repo::RepoInfo;
+use std::sync::Mutex;
 
 /// A framework for executing work on repositories in parallel
 pub struct ParallelExecutor {
@@ -23,14 +23,12 @@ impl ParallelExecutor {
     {
         self.repos
             .par_iter()
-            .filter_map(|repo_info| {
-                match work_fn(repo_info) {
-                    Ok(Some(result)) => Some(result),
-                    Ok(None) => None,
-                    Err(e) => {
-                        eprintln!("❌ {}: {}", repo_info.slug, e);
-                        None
-                    }
+            .filter_map(|repo_info| match work_fn(repo_info) {
+                Ok(Some(result)) => Some(result),
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("❌ {}: {}", repo_info.slug, e);
+                    None
                 }
             })
             .collect()
@@ -41,12 +39,9 @@ impl ParallelExecutor {
     pub fn execute_all<T, F>(&self, work_fn: F) -> Vec<Result<T>>
     where
         T: Send,
-        F: Fn(&RepoInfo) -> Result<T> + Sync,
+        F: Fn(&RepoInfo) -> Result<T> + Sync + Send,
     {
-        self.repos
-            .par_iter()
-            .map(|repo_info| work_fn(repo_info))
-            .collect()
+        self.repos.par_iter().map(work_fn).collect()
     }
 
     /// Execute a function on each repository in parallel, with mutable shared state
@@ -61,12 +56,10 @@ impl ParallelExecutor {
 
         self.repos
             .par_iter()
-            .for_each(|repo_info| {
-                match work_fn(repo_info, &state_mutex) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        eprintln!("❌ {}: {}", repo_info.slug, e);
-                    }
+            .for_each(|repo_info| match work_fn(repo_info, &state_mutex) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("❌ {}: {}", repo_info.slug, e);
                 }
             });
 
@@ -113,9 +106,7 @@ mod tests {
         ];
         let executor = ParallelExecutor::new(repos);
 
-        let results = executor.execute(|repo| {
-            Ok(Some(repo.slug.clone()))
-        });
+        let results = executor.execute(|repo| Ok(Some(repo.slug.clone())));
 
         assert_eq!(results.len(), 2);
         assert!(results.contains(&"owner/repo1".to_string()));

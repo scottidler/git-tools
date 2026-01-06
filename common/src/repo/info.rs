@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-use eyre::{Result, Context};
-use std::process::Command;
+use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Information about a discovered Git repository
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

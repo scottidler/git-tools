@@ -1,18 +1,19 @@
 use clap::Parser;
 use eyre::{eyre, Result};
-use log::debug;
-use std::path::{Path, PathBuf};
-use tokio;
-use shellexpand;
 use ini::Ini;
-use walkdir::WalkDir;
+use log::debug;
 use regex::Regex;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
-#[command(name = "ls-git-repos", about = "List all local Git repositories with their GitHub reposlug")]
+#[command(
+    name = "ls-git-repos",
+    about = "List all local Git repositories with their GitHub reposlug"
+)]
 #[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = false)]
@@ -48,7 +49,7 @@ fn find_git_repos(base_path: &Path) -> Result<Vec<String>> {
     for entry in WalkDir::new(base_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name() == "config" && e.path().parent().map_or(false, |p| p.ends_with(".git")))
+        .filter(|e| e.file_name() == "config" && e.path().parent().is_some_and(|p| p.ends_with(".git")))
     {
         let config_path = entry.path();
         debug!("Found Git config: {}", config_path.display());

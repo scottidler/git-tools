@@ -1,13 +1,10 @@
-use clap::Parser;
 use chrono::{DateTime, Utc};
-use common::repo::RepoDiscovery;
+use clap::Parser;
 use common::parallel::ParallelExecutor;
-use env_logger;
-use eyre::{Result, Context};
+use common::repo::RepoDiscovery;
+use eyre::{Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
-use serde_yaml;
-use serde_json;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::Command;
@@ -55,11 +52,11 @@ fn main() -> Result<()> {
 
     // Discover repositories from the provided paths
     let discovery = RepoDiscovery::new(args.paths);
-    let repos = discovery.discover()
-        .context("failed to scan for repositories")?;
+    let repos = discovery.discover().context("failed to scan for repositories")?;
 
     // Process each repository in parallel
     let executor = ParallelExecutor::new(repos);
+    #[allow(clippy::type_complexity)]
     let repo_detailed_data: Vec<(String, Vec<(String, i64, String)>)> = executor.execute(|repo_info| {
         debug!("Processing repo: {} ({})", repo_info.slug, repo_info.path.display());
 
@@ -85,17 +82,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-
-
 /// Queries the GitHub CLI for pull requests, filtering those older than the specified days.
 fn get_stale_prs(days: i64, reposlug: &str) -> Result<Vec<(String, i64, String)>> {
     // Use the GitHub CLI to list PRs in JSON format.
     let output = Command::new("gh")
-        .args(&[
-            "pr", "list",
-            "--repo", reposlug,
-            "--limit", "100",
-            "--json", "title,number,createdAt,author"
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            reposlug,
+            "--limit",
+            "100",
+            "--json",
+            "title,number,createdAt,author",
         ])
         .output()
         .wrap_err("Failed to execute gh command")?;
@@ -105,12 +104,12 @@ fn get_stale_prs(days: i64, reposlug: &str) -> Result<Vec<(String, i64, String)>
     let stdout = String::from_utf8(output.stdout)?;
     debug!("gh output: {}", stdout);
 
-    let pr_entries: Vec<GhPr> = serde_json::from_str(&stdout)
-        .wrap_err("Failed to parse gh JSON output")?;
+    let pr_entries: Vec<GhPr> = serde_json::from_str(&stdout).wrap_err("Failed to parse gh JSON output")?;
 
     let now: DateTime<Utc> = Utc::now();
     // Filter PRs based on their age.
-    let stale_prs: Vec<(String, i64, String)> = pr_entries.into_iter()
+    let stale_prs: Vec<(String, i64, String)> = pr_entries
+        .into_iter()
         .filter_map(|pr| {
             let created_at = DateTime::parse_from_rfc3339(&pr.created_at).ok()?.with_timezone(&Utc);
             let age_days = (now - created_at).num_days();
@@ -128,9 +127,8 @@ fn get_stale_prs(days: i64, reposlug: &str) -> Result<Vec<(String, i64, String)>
     Ok(stale_prs)
 }
 
-
-
 /// Print hierarchical summary: repo -> user (count, max)
+#[allow(clippy::type_complexity)]
 fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]) {
     for (repo_slug, pr_list) in repo_data {
         println!("{}:", repo_slug);
@@ -146,16 +144,17 @@ fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]
 
         // Sort authors by max age (descending) for consistent output
         let mut sorted_authors: Vec<_> = author_stats.iter().collect();
-        sorted_authors.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        sorted_authors.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
 
         for (author, (count, max_age)) in sorted_authors {
             println!("  {}: ({}, {})", author, count, max_age);
         }
-                 println!(); // Empty line between repos
+        println!(); // Empty line between repos
     }
 }
 
 /// Generate full YAML with individual PRs (detailed output)
+#[allow(clippy::type_complexity)]
 fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Result<()> {
     let mut repo_dict: HashMap<String, HashMap<String, AuthorPRs>> = HashMap::new();
 
@@ -166,7 +165,7 @@ fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Res
         for (pr_title, days, author) in pr_list {
             author_prs
                 .entry(author.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push((pr_title.clone(), *days));
         }
 
@@ -183,30 +182,25 @@ fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Res
                 .collect();
 
             let count = pr_maps.len();
-            authors_dict.insert(author, AuthorPRs {
-                prs: pr_maps,
-                count,
-            });
+            authors_dict.insert(author, AuthorPRs { prs: pr_maps, count });
         }
 
         repo_dict.insert(repo_slug.clone(), authors_dict);
     }
 
-    let yaml_data = serde_yaml::to_string(&repo_dict)
-        .wrap_err("Failed to serialize data to YAML")?;
-    io::stdout().write_all(yaml_data.as_bytes())
+    let yaml_data = serde_yaml::to_string(&repo_dict).wrap_err("Failed to serialize data to YAML")?;
+    io::stdout()
+        .write_all(yaml_data.as_bytes())
         .wrap_err("Failed to write YAML to stdout")?;
     Ok(())
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::TempDir;
     use std::process::Command;
+    use tempfile::TempDir;
 
     fn create_test_repo_with_remote(temp_dir: &TempDir, repo_name: &str, remote_url: &str) -> std::path::PathBuf {
         let repo_path = temp_dir.path().join(repo_name);
@@ -239,8 +233,12 @@ mod tests {
         let repos = discovery.discover().unwrap();
 
         assert_eq!(repos.len(), 2);
-        assert!(repos.iter().any(|r| r.path.file_name().unwrap() == "repo1" && r.slug == "org1/repo1"));
-        assert!(repos.iter().any(|r| r.path.file_name().unwrap() == "repo2" && r.slug == "org2/repo2"));
+        assert!(repos
+            .iter()
+            .any(|r| r.path.file_name().unwrap() == "repo1" && r.slug == "org1/repo1"));
+        assert!(repos
+            .iter()
+            .any(|r| r.path.file_name().unwrap() == "repo2" && r.slug == "org2/repo2"));
     }
 
     #[test]
@@ -248,12 +246,12 @@ mod tests {
         use clap::Parser;
 
         // Test default path
-        let cli = Cli::parse_from(&["ls-stale-prs", "30"]);
+        let cli = Cli::parse_from(["ls-stale-prs", "30"]);
         assert_eq!(cli.days, 30);
         assert_eq!(cli.paths, vec!["."]);
 
         // Test custom paths
-        let cli = Cli::parse_from(&["ls-stale-prs", "15", "/path1", "/path2"]);
+        let cli = Cli::parse_from(["ls-stale-prs", "15", "/path1", "/path2"]);
         assert_eq!(cli.days, 15);
         assert_eq!(cli.paths, vec!["/path1", "/path2"]);
     }
@@ -263,23 +261,21 @@ mod tests {
         use clap::Parser;
 
         // Test detailed flag
-        let cli = Cli::parse_from(&["ls-stale-prs", "30", "--detailed"]);
+        let cli = Cli::parse_from(["ls-stale-prs", "30", "--detailed"]);
         assert_eq!(cli.days, 30);
-        assert_eq!(cli.detailed, true);
+        assert!(cli.detailed);
         assert_eq!(cli.paths, vec!["."]);
 
         // Test short form
-        let cli = Cli::parse_from(&["ls-stale-prs", "15", "-d", "/path1"]);
+        let cli = Cli::parse_from(["ls-stale-prs", "15", "-d", "/path1"]);
         assert_eq!(cli.days, 15);
-        assert_eq!(cli.detailed, true);
+        assert!(cli.detailed);
         assert_eq!(cli.paths, vec!["/path1"]);
 
         // Test default (no detailed flag)
-        let cli = Cli::parse_from(&["ls-stale-prs", "45"]);
-        assert_eq!(cli.detailed, false);
+        let cli = Cli::parse_from(["ls-stale-prs", "45"]);
+        assert!(!cli.detailed);
     }
-
-
 
     #[test]
     fn test_author_prs_structure() {
@@ -295,7 +291,8 @@ mod tests {
         assert_eq!(author_prs.prs.len(), 2);
     }
 
-        #[test]
+    #[test]
+    #[allow(clippy::type_complexity)]
     fn test_print_hierarchical_summary_empty() {
         let repo_data: Vec<(String, Vec<(String, i64, String)>)> = vec![];
 
@@ -307,14 +304,18 @@ mod tests {
     #[test]
     fn test_print_hierarchical_summary_with_data() {
         let repo_data = vec![
-            ("org1/repo1".to_string(), vec![
-                ("PR 1 (pr 100)".to_string(), 45, "user1".to_string()),
-                ("PR 2 (pr 200)".to_string(), 30, "user1".to_string()),
-                ("PR 3 (pr 300)".to_string(), 120, "user2".to_string()),
-            ]),
-            ("org2/repo2".to_string(), vec![
-                ("PR 4 (pr 400)".to_string(), 89, "user3".to_string()),
-            ]),
+            (
+                "org1/repo1".to_string(),
+                vec![
+                    ("PR 1 (pr 100)".to_string(), 45, "user1".to_string()),
+                    ("PR 2 (pr 200)".to_string(), 30, "user1".to_string()),
+                    ("PR 3 (pr 300)".to_string(), 120, "user2".to_string()),
+                ],
+            ),
+            (
+                "org2/repo2".to_string(),
+                vec![("PR 4 (pr 400)".to_string(), 89, "user3".to_string())],
+            ),
         ];
 
         // Test that function handles data without panicking
@@ -331,12 +332,13 @@ mod tests {
 
     #[test]
     fn test_generate_full_yaml_with_data() {
-        let repo_data = vec![
-            ("test/repo1".to_string(), vec![
+        let repo_data = vec![(
+            "test/repo1".to_string(),
+            vec![
                 ("Fix bug (pr 123)".to_string(), 10, "user1".to_string()),
                 ("Add feature (pr 456)".to_string(), 15, "user2".to_string()),
-            ]),
-        ];
+            ],
+        )];
 
         // Test that function handles data without panicking
         let result = generate_full_yaml(&repo_data);
@@ -346,7 +348,7 @@ mod tests {
     #[test]
     fn test_max_age_calculation() {
         // Test data that mimics get_stale_prs output: (title, age, author)
-        let pr_list = vec![
+        let pr_list = [
             ("PR 1 (pr 100)".to_string(), 10, "user1".to_string()),
             ("PR 2 (pr 200)".to_string(), 25, "user2".to_string()),
             ("PR 3 (pr 300)".to_string(), 15, "user1".to_string()),
@@ -382,7 +384,7 @@ mod tests {
         assert!(results.contains(&"owner/repo2".to_string()));
     }
 
-        #[test]
+    #[test]
     fn test_get_stale_prs_blocking() {
         // Test that get_stale_prs works as a blocking function
         // This will fail if gh is not installed, but that's expected in CI
@@ -397,15 +399,16 @@ mod tests {
         use std::collections::HashMap;
 
         // Test data with multiple PRs per author, unsorted
-        let repo_data = vec![
-            ("test/repo1".to_string(), vec![
+        let repo_data = vec![(
+            "test/repo1".to_string(),
+            vec![
                 ("Old PR (pr 100)".to_string(), 30, "user1".to_string()),
                 ("Newer PR (pr 200)".to_string(), 10, "user1".to_string()),
                 ("Oldest PR (pr 300)".to_string(), 50, "user1".to_string()),
                 ("Middle PR (pr 400)".to_string(), 20, "user1".to_string()),
                 ("Single PR (pr 500)".to_string(), 15, "user2".to_string()),
-            ]),
-        ];
+            ],
+        )];
 
         // Manually run the sorting logic to test it
         let mut repo_dict: HashMap<String, HashMap<String, AuthorPRs>> = HashMap::new();
@@ -417,7 +420,7 @@ mod tests {
             for (pr_title, days, author) in pr_list {
                 author_prs
                     .entry(author.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((pr_title.clone(), *days));
             }
 
@@ -434,10 +437,7 @@ mod tests {
                     .collect();
 
                 let count = pr_maps.len();
-                authors_dict.insert(author, AuthorPRs {
-                    prs: pr_maps,
-                    count,
-                });
+                authors_dict.insert(author, AuthorPRs { prs: pr_maps, count });
             }
 
             repo_dict.insert(repo_slug.clone(), authors_dict);
@@ -448,7 +448,8 @@ mod tests {
         assert_eq!(user1_prs.len(), 4);
 
         // Extract the days values to verify sorting
-        let days: Vec<i64> = user1_prs.iter()
+        let days: Vec<i64> = user1_prs
+            .iter()
             .map(|pr_map| *pr_map.values().next().unwrap())
             .collect();
 
@@ -456,21 +457,24 @@ mod tests {
         assert_eq!(days, vec![50, 30, 20, 10]);
 
         // Verify the PR titles are in the correct order
-        let pr_titles: Vec<String> = user1_prs.iter()
+        let pr_titles: Vec<String> = user1_prs
+            .iter()
             .map(|pr_map| pr_map.keys().next().unwrap().clone())
             .collect();
 
-        assert_eq!(pr_titles, vec![
-            "Oldest PR (pr 300)".to_string(),
-            "Old PR (pr 100)".to_string(),
-            "Middle PR (pr 400)".to_string(),
-            "Newer PR (pr 200)".to_string()
-        ]);
+        assert_eq!(
+            pr_titles,
+            vec![
+                "Oldest PR (pr 300)".to_string(),
+                "Old PR (pr 100)".to_string(),
+                "Middle PR (pr 400)".to_string(),
+                "Newer PR (pr 200)".to_string()
+            ]
+        );
 
         // Verify user2 has single PR
         let user2_prs = &repo_dict["test/repo1"]["user2"].prs;
         assert_eq!(user2_prs.len(), 1);
         assert_eq!(*user2_prs[0].values().next().unwrap(), 15);
     }
-
 }

@@ -1,17 +1,13 @@
+use eyre::{Context, Result};
 use std::path::Path;
-use eyre::{Result, Context};
 use std::process::Command;
 
 /// Parse a Git remote URL into `owner/repo` format
 /// Supports both SSH and HTTPS GitHub URLs
 pub fn parse_git_url(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        Some(rest.trim_end_matches(".git").to_string())
-    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
-        Some(rest.trim_end_matches(".git").to_string())
-    } else {
-        None
-    }
+    url.strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .map(|rest| rest.trim_end_matches(".git").to_string())
 }
 
 /// Get the repository slug from a path by querying git remote

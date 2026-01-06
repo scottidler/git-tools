@@ -2,13 +2,13 @@ use std::process::Command;
 
 fn main() {
     let git_describe = Command::new("git")
-        .args(&["describe", "--tags", "--always"])
+        .args(["describe", "--tags", "--always"])
         .output()
         .and_then(|output| {
             if output.status.success() {
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
             } else {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "git describe failed"))
+                Err(std::io::Error::other("git describe failed"))
             }
         })
         .unwrap_or_else(|_| {

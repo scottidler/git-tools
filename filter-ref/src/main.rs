@@ -1,8 +1,8 @@
+use chrono::{Duration, Local, TimeZone, Utc};
 use clap::Parser;
-use eyre::{Result, eyre, WrapErr};
+use eyre::{eyre, Result, WrapErr};
 use git2::Repository;
-use chrono::{Local, Duration, Utc, TimeZone};
-use log::{info, debug};
+use log::{debug, info};
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
@@ -34,12 +34,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn test_ref(repo: &Repository, ref_: &str, show_date: bool, show_author: bool, span: (Option<Duration>, Duration)) -> Result<()> {
+fn test_ref(
+    repo: &Repository,
+    ref_: &str,
+    show_date: bool,
+    show_author: bool,
+    span: (Option<Duration>, Duration),
+) -> Result<()> {
     let obj = repo.revparse_single(ref_).wrap_err("Failed to parse ref")?;
     let commit = obj.peel_to_commit().wrap_err("Failed to peel object to commit")?;
     let author = commit.author();
     let author_name = author.name().ok_or_else(|| eyre!("Author name not found"))?;
-    let commit_time = Utc.timestamp_opt(commit.time().seconds(), 0).single().ok_or_else(|| eyre!("Invalid timestamp"))?;
+    let commit_time = Utc
+        .timestamp_opt(commit.time().seconds(), 0)
+        .single()
+        .ok_or_else(|| eyre!("Invalid timestamp"))?;
     let now = Local::now();
 
     debug!("Commit Time: {}", commit_time);
@@ -76,8 +85,8 @@ fn parse_span(s: &str) -> Result<(Option<Duration>, Duration)> {
 
 fn parse_duration(s: &str) -> Result<Duration> {
     let len = s.len();
-    let num: i64 = s[..len-1].parse()?;
-    match &s[len-1..] {
+    let num: i64 = s[..len - 1].parse()?;
+    match &s[len - 1..] {
         "y" => Ok(Duration::weeks(num * 52)), // Approximation
         "m" => Ok(Duration::weeks(num * 4)),  // Approximation
         "w" => Ok(Duration::weeks(num)),
