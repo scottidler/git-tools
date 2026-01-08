@@ -22,4 +22,4 @@ git2 = "0.20.2"
 common = { path = "common" }
 
 [workspace.package]
-version = "0.1.14"
+version = "0.1.15"
