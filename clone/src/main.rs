@@ -191,6 +191,48 @@ fn git(args: &[&str], envs: Option<&[(&str, &str)]>) -> Result<()> {
 fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     std::env::set_current_dir(full_clone_path).wrap_err("Failed to set current directory")?;
 
+    // Check if repo has any commits (handles empty repos from failed clones)
+    let head_check = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if !matches!(head_check, Ok(status) if status.success()) {
+        // No commits - try to fetch from remote and reset to remote branch
+        let fetch_result = Command::new("git")
+            .args(["fetch", "origin"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        if !matches!(fetch_result, Ok(status) if status.success()) {
+            return Err(eyre!(
+                "Repository exists but has no commits and fetch failed. \
+                 Remove {} and try again.",
+                full_clone_path.display()
+            ));
+        }
+
+        // Reset local branch to remote (fixes empty repo from failed clone)
+        let reset_result = Command::new("git")
+            .args(["reset", "--hard", "origin/HEAD"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        if !matches!(reset_result, Ok(status) if status.success()) {
+            return Err(eyre!(
+                "Repository exists but failed to reset to remote. \
+                 Remove {} and try again.",
+                full_clone_path.display()
+            ));
+        }
+
+        // Successfully recovered - skip the checkout/pull below, just return
+        return Ok(());
+    }
+
     // Check for untracked files
     let status_output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -272,6 +314,23 @@ fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<()> {
             repospec,
             cli.remote,
             REMOTE_URLS[1]
+        ));
+    }
+
+    // Verify clone actually fetched commits (handles partial clone failures)
+    let head_check = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&full_clone_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if !matches!(head_check, Ok(status) if status.success()) {
+        // Clone left an empty repo - clean up and return error
+        std::fs::remove_dir_all(&full_clone_path).ok();
+        return Err(eyre!(
+            "Clone appeared to succeed but repository has no commits. \
+             This can happen with newly created repos - please try again."
         ));
     }
 
