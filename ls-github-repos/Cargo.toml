@@ -1,6 +1,6 @@
 [package]
 name = "ls-github-repos"
-version = "0.1.13"
+version = "0.1.17"
 edition = "2024"
 build = "build.rs"
 
