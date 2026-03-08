@@ -2,9 +2,11 @@ use clap::{Parser, ValueEnum};
 use eyre::{Result, eyre};
 use log::debug;
 use reqwest::{Client, header};
+use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::{fmt, fs};
+use std::{env, fmt, fs};
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
@@ -59,19 +61,48 @@ impl fmt::Display for RepoType {
     }
 }
 
+const CONFIG_PATH: &str = "~/.config/ls-github-repos/ls-github-repos.yml";
+
+#[derive(Deserialize)]
+struct Config {
+    tokens: HashMap<String, String>,
+}
+
+fn resolve_token(name: &str, token_path: &str) -> Result<String> {
+    // Try YAML config first: maps name -> env var name
+    let expanded_config = shellexpand::tilde(CONFIG_PATH).to_string();
+    if let Ok(contents) = fs::read_to_string(&expanded_config) {
+        let config: Config =
+            serde_yaml::from_str(&contents).map_err(|e| eyre!("Failed to parse config: {}", e))?;
+        if let Some(env_var) = config.tokens.get(name) {
+            let token = env::var(env_var)
+                .map_err(|_| eyre!("env var '{}' (for '{}') is not set", env_var, name))?;
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                return Err(eyre!("env var '{}' (for '{}') is empty", env_var, name));
+            }
+            debug!("Resolved token for '{}' from env var '{}'", name, env_var);
+            return Ok(token);
+        }
+    }
+
+    // Fall back to file-based token
+    let expanded_token_path = shellexpand::tilde(token_path).to_string();
+    let token_file_path = PathBuf::from(expanded_token_path).join(name);
+    let token = fs::read_to_string(&token_file_path)
+        .map_err(|e| eyre!("Failed to read token file '{}': {}", token_file_path.display(), e))?
+        .trim()
+        .to_string();
+    debug!("Resolved token for '{}' from file", name);
+    Ok(token)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Cli::parse();
 
-    let expanded_token_path = shellexpand::tilde(&args.token_path).to_string();
-    let token_path = PathBuf::from(expanded_token_path);
-    let token_file_path = token_path.join(&args.name);
-
-    let token = fs::read_to_string(token_file_path)
-        .map_err(|e| eyre!("Failed to read token file: {}", e))?
-        .trim()
-        .to_string();
+    let token = resolve_token(&args.name, &args.token_path)?;
 
     debug!("Trimmed token: '{}'", token);
 
