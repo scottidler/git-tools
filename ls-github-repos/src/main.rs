@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
 
     // Filter by language if --lang is specified
     if !args.lang.is_empty() {
-        repo_data.retain(|(_name, _date, lang)| matches_language(lang.as_deref(), &args.lang));
+        repo_data.retain(|(_, _, lang)| matches_language(lang.as_deref(), &args.lang));
     }
 
     // Sort based on the provided flag: if --age is set, sort by created_at (oldest first), otherwise sort alphabetically by repo name.
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         repo_data.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
-    for (repo_name, created_at, _lang) in repo_data {
+    for (repo_name, created_at, _) in repo_data {
         if args.age {
             println!("{} {}", created_at, repo_name);
         } else {
