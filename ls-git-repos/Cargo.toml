@@ -6,10 +6,12 @@ build = "build.rs"
 
 [dependencies]
 clap = { workspace = true }
+common = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
+rayon = "1.10.0"
 shellexpand = "3.1.1"
 tokio = { version = "1.47.0", features = ["full"] }
 walkdir = "2.5.0"

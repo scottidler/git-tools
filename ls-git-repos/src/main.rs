@@ -1,7 +1,9 @@
 use clap::Parser;
+use common::language::{detect_language, matches_language};
 use eyre::{eyre, Result};
 use ini::Ini;
 use log::debug;
+use rayon::prelude::*;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -20,6 +22,9 @@ use walkdir::WalkDir;
 struct Cli {
     #[clap(value_parser, default_value = ".")]
     path: String,
+
+    #[clap(short, long, num_args = 1..)]
+    lang: Vec<String>,
 }
 
 #[tokio::main]
@@ -34,17 +39,35 @@ async fn main() -> Result<()> {
         return Err(eyre!("The specified path does not exist: {}", base_path.display()));
     }
 
-    let reposlugs = find_git_repos(&base_path)?;
-    for reposlug in reposlugs {
-        println!("{}", reposlug);
+    let repos = find_git_repos(&base_path)?;
+
+    let mut results: Vec<String> = if args.lang.is_empty() {
+        repos.into_iter().map(|(slug, _)| slug).collect()
+    } else {
+        repos
+            .par_iter()
+            .filter_map(|(slug, path)| {
+                let detected = detect_language(path);
+                if matches_language(detected.as_deref(), &args.lang) {
+                    Some(slug.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    results.sort();
+    for slug in results {
+        println!("{}", slug);
     }
 
     Ok(())
 }
 
-/// Recursively finds `.git/config` files and extracts reposlug
-fn find_git_repos(base_path: &Path) -> Result<Vec<String>> {
-    let mut reposlugs = Vec::new();
+/// Recursively finds `.git/config` files and extracts (reposlug, repo_root) pairs
+fn find_git_repos(base_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut repos = Vec::new();
 
     for entry in WalkDir::new(base_path)
         .into_iter()
@@ -54,13 +77,15 @@ fn find_git_repos(base_path: &Path) -> Result<Vec<String>> {
         let config_path = entry.path();
         debug!("Found Git config: {}", config_path.display());
 
-        if let Some(reposlug) = parse_git_config(config_path)? {
-            reposlugs.push(reposlug);
+        if let Some(slug) = parse_git_config(config_path)? {
+            // repo root is parent of .git/, which is parent of config
+            if let Some(repo_root) = config_path.parent().and_then(|git_dir| git_dir.parent()) {
+                repos.push((slug, repo_root.to_path_buf()));
+            }
         }
     }
 
-    reposlugs.sort();
-    Ok(reposlugs)
+    Ok(repos)
 }
 
 /// Parses `.git/config` to extract the repository slug in the format `User/RepoName`
