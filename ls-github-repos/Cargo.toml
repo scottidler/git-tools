@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 clap = { workspace = true }
+common = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

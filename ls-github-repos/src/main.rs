@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use common::language::matches_language;
 use eyre::{Result, eyre};
 use log::debug;
 use reqwest::{Client, header};
@@ -31,6 +32,9 @@ struct Cli {
 
     #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
     age: bool,
+
+    #[clap(short, long, num_args = 1..)]
+    lang: Vec<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -107,6 +111,11 @@ async fn main() -> Result<()> {
     let repo_type = determine_repo_type(&args.name, &token).await?;
     let mut repo_data = ls_github_repos(repo_type, &args.name, args.archived, &token).await?;
 
+    // Filter by language if --lang is specified
+    if !args.lang.is_empty() {
+        repo_data.retain(|(_name, _date, lang)| matches_language(lang.as_deref(), &args.lang));
+    }
+
     // Sort based on the provided flag: if --age is set, sort by created_at (oldest first), otherwise sort alphabetically by repo name.
     if args.age {
         repo_data.sort_by(|a, b| a.1.cmp(&b.1));
@@ -114,7 +123,7 @@ async fn main() -> Result<()> {
         repo_data.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
-    for (repo_name, created_at) in repo_data {
+    for (repo_name, created_at, _lang) in repo_data {
         if args.age {
             println!("{} {}", created_at, repo_name);
         } else {
@@ -170,7 +179,7 @@ async fn ls_github_repos(
     name: &str,
     archived: bool,
     token: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(String, String, Option<String>)>> {
     let client = Client::new();
     let url = repo_type.repo_url(name);
     let mut headers = header::HeaderMap::new();
@@ -217,7 +226,8 @@ async fn ls_github_repos(
                 && let (Some(repo_name), Some(created_at)) = (repo["full_name"].as_str(), repo["created_at"].as_str())
             {
                 let date = created_at[..10].to_string();
-                repo_data.push((repo_name.to_owned(), date));
+                let language = repo["language"].as_str().map(|s| s.to_owned());
+                repo_data.push((repo_name.to_owned(), date, language));
             }
         }
         page += 1;
