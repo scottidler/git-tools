@@ -1,0 +1,129 @@
+# Language detection configuration for ls-git-repos.
+# Embedded into the binary at compile time via include_str!.
+#
+# Future: could support runtime override from ~/.config/git-tools/languages.yml
+# to allow user customization without recompiling.
+
+# Directories to skip during extension counting (performance).
+skip_dirs:
+  - .git
+  - node_modules
+  - target
+  - vendor
+  - dist
+  - build
+  - __pycache__
+  - .tox
+  - .venv
+  - venv
+
+# Exact-name marker files checked via repo_path.join(name).exists().
+# Checked in order; first match wins - order encodes priority.
+language_markers:
+  - file: Cargo.toml
+    language: Rust
+  - file: go.mod
+    language: Go
+  - file: pyproject.toml
+    language: Python
+  - file: setup.py
+    language: Python
+  - file: tsconfig.json
+    language: TypeScript
+  - file: package.json
+    language: JavaScript
+  - file: pom.xml
+    language: Java
+  - file: build.gradle
+    language: Java
+  - file: build.gradle.kts
+    language: Kotlin
+  - file: CMakeLists.txt
+    language: C++
+  - file: mix.exs
+    language: Elixir
+  - file: Gemfile
+    language: Ruby
+  - file: composer.json
+    language: PHP
+  - file: build.zig
+    language: Zig
+  - file: dune-project
+    language: OCaml
+  - file: stack.yaml
+    language: Haskell
+  - file: flake.nix
+    language: Nix
+  - file: shell.nix
+    language: Nix
+
+# Extension-based marker files detected by scanning the repo root directory.
+# Used for languages whose project files have variable names (e.g., *.csproj, *.cabal).
+extension_markers:
+  - ext: csproj
+    language: C#
+  - ext: cabal
+    language: Haskell
+
+# Maps file extensions to languages for fallback counting.
+# When no marker file is found, source files are counted (max_depth: 3)
+# and the language with the most files wins.
+extensions:
+  - ext: rs
+    language: Rust
+  - ext: go
+    language: Go
+  - ext: py
+    language: Python
+  - ext: js
+    language: JavaScript
+  - ext: ts
+    language: TypeScript
+  - ext: tsx
+    language: TypeScript
+  - ext: jsx
+    language: JavaScript
+  - ext: java
+    language: Java
+  - ext: kt
+    language: Kotlin
+  - ext: cs
+    language: C#
+  - ext: cpp
+    language: C++
+  - ext: cc
+    language: C++
+  - ext: c
+    language: C
+  - ext: h
+    language: C
+  - ext: rb
+    language: Ruby
+  - ext: php
+    language: PHP
+  - ext: ex
+    language: Elixir
+  - ext: exs
+    language: Elixir
+  - ext: zig
+    language: Zig
+  - ext: ml
+    language: OCaml
+  - ext: hs
+    language: Haskell
+  - ext: nix
+    language: Nix
+  - ext: swift
+    language: Swift
+  - ext: scala
+    language: Scala
+  - ext: dart
+    language: Dart
+  - ext: lua
+    language: Lua
+  - ext: sh
+    language: Shell
+  - ext: bash
+    language: Shell
+  - ext: zsh
+    language: Shell

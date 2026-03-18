@@ -72,11 +72,9 @@ fn resolve_token(name: &str, token_path: &str) -> Result<String> {
     // Try YAML config first: maps name -> env var name
     let expanded_config = shellexpand::tilde(CONFIG_PATH).to_string();
     if let Ok(contents) = fs::read_to_string(&expanded_config) {
-        let config: Config =
-            serde_yaml::from_str(&contents).map_err(|e| eyre!("Failed to parse config: {}", e))?;
+        let config: Config = serde_yaml::from_str(&contents).map_err(|e| eyre!("Failed to parse config: {}", e))?;
         if let Some(env_var) = config.tokens.get(name) {
-            let token = env::var(env_var)
-                .map_err(|_| eyre!("env var '{}' (for '{}') is not set", env_var, name))?;
+            let token = env::var(env_var).map_err(|_| eyre!("env var '{}' (for '{}') is not set", env_var, name))?;
             let token = token.trim().to_string();
             if token.is_empty() {
                 return Err(eyre!("env var '{}' (for '{}') is empty", env_var, name));
