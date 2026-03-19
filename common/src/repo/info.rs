@@ -46,9 +46,26 @@ fn find_repo_root_and_slug<P: AsRef<Path>>(path: P) -> Result<(PathBuf, String)>
         .output()
         .context("git remote get-url failed")?;
     let url = String::from_utf8(url_out.stdout)?.trim().to_string();
-    let slug = crate::git::parse_git_url(&url).unwrap_or_else(|| "unknown/unknown".into());
+    let slug = crate::git::parse_git_url(&url).unwrap_or_else(|| slug_from_path(&repo_root));
 
     Ok((repo_root, slug))
+}
+
+/// Derive a slug from the filesystem path as a fallback.
+/// Uses the last two path components (e.g., `/home/user/repos/org/repo` -> `org/repo`).
+fn slug_from_path(path: &Path) -> String {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let len = components.len();
+    if len >= 2 {
+        format!("{}/{}", components[len - 2], components[len - 1])
+    } else if len == 1 {
+        format!("unknown/{}", components[0])
+    } else {
+        "unknown/unknown".into()
+    }
 }
 
 #[cfg(test)]

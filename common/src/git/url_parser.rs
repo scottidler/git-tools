@@ -3,10 +3,11 @@ use std::path::Path;
 use std::process::Command;
 
 /// Parse a Git remote URL into `owner/repo` format
-/// Supports both SSH and HTTPS GitHub URLs
+/// Supports SSH, HTTPS, and ssh:// GitHub URLs
 pub fn parse_git_url(url: &str) -> Option<String> {
     url.strip_prefix("git@github.com:")
         .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
         .map(|rest| rest.trim_end_matches(".git").to_string())
 }
 
@@ -53,6 +54,18 @@ mod tests {
     #[test]
     fn test_parse_git_url_https_no_git() {
         let url = "https://github.com/owner/repo";
+        assert_eq!(parse_git_url(url), Some("owner/repo".to_string()));
+    }
+
+    #[test]
+    fn test_parse_git_url_ssh_protocol() {
+        let url = "ssh://git@github.com/owner/repo.git";
+        assert_eq!(parse_git_url(url), Some("owner/repo".to_string()));
+    }
+
+    #[test]
+    fn test_parse_git_url_ssh_protocol_no_git() {
+        let url = "ssh://git@github.com/owner/repo";
         assert_eq!(parse_git_url(url), Some("owner/repo".to_string()));
     }
 
