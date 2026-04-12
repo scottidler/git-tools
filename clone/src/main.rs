@@ -158,13 +158,14 @@ fn main() -> Result<()> {
 
     let full_clone_path = PathBuf::from(&cli.clonepath).join(&repospec);
 
-    if full_clone_path.exists() && full_clone_path.read_dir()?.next().is_some() {
-        update_existing_repo(&full_clone_path, &cli.revision)?
+    let dest = if full_clone_path.exists() && full_clone_path.read_dir()?.next().is_some() {
+        update_existing_repo(&full_clone_path, &cli.revision)?;
+        full_clone_path
     } else {
         clone_new_repo(&cli, &repospec)?
-    }
+    };
 
-    println!("{}", repospec);
+    println!("{}", dest.display());
 
     Ok(())
 }
@@ -268,7 +269,7 @@ fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     Ok(())
 }
 
-fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<()> {
+fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<PathBuf> {
     let revision = if cli.versioning {
         fetch_revision_sha(&cli.remote, repospec, cli.verbose)?
     } else {
@@ -341,7 +342,7 @@ fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<()> {
     git(&["checkout", &revision], None)?;
     git(&["clean", "-xfd"], None)?;
 
-    Ok(())
+    Ok(full_clone_path)
 }
 
 fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Result<String> {
