@@ -32,7 +32,9 @@ fn main() -> Result<()> {
     // Open the repository from the specified directory
     let repo = Repository::discover(&directory)?;
     let remote = repo.find_remote("origin")?;
-    let remote_url = remote.url().ok_or_else(|| eyre!("Remote 'origin' URL not found"))?;
+    let remote_url = remote
+        .url()
+        .map_err(|_| eyre!("Remote 'origin' URL not found or not valid UTF-8"))?;
 
     if args.verbose {
         println!("Remote URL: {}", remote_url);
