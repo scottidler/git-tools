@@ -10,5 +10,5 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 git2 = { workspace = true }
-regex = "1.11.1"
-url = "2.5.4"
+regex = "1.12.3"
+url = "2.5.8"

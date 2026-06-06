@@ -44,7 +44,9 @@ fn test_ref(
     let obj = repo.revparse_single(ref_).wrap_err("Failed to parse ref")?;
     let commit = obj.peel_to_commit().wrap_err("Failed to peel object to commit")?;
     let author = commit.author();
-    let author_name = author.name().ok_or_else(|| eyre!("Author name not found"))?;
+    let author_name = author
+        .name()
+        .map_err(|_| eyre!("Author name not found or not valid UTF-8"))?;
     let commit_time = Utc
         .timestamp_opt(commit.time().seconds(), 0)
         .single()
