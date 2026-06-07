@@ -11,7 +11,13 @@ clone() {
     if [[ "$1" == (-h|--help|-v|--version) ]]; then
         eval $CLONE "$@"
     else
-        cd $($CLONE "$1") || return
+        local dest
+        dest=$(eval $CLONE "$@") || return $?
+        if [[ -z "$dest" || ! -d "$dest" ]]; then
+            print -u2 -- "clone: no valid destination returned; staying in $PWD"
+            return 1
+        fi
+        cd "$dest"
     fi
 }
 
