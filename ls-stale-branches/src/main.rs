@@ -145,7 +145,7 @@ fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]
 
         // Sort authors by max age (descending) for consistent output
         let mut sorted_authors: Vec<_> = author_stats.iter().collect();
-        sorted_authors.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        sorted_authors.sort_by_key(|a| std::cmp::Reverse(a.1 .1));
 
         for (author, (count, max_age)) in sorted_authors {
             println!("  {}: ({}, {})", author, count, max_age);
@@ -175,7 +175,7 @@ fn generate_full_yaml(repo_data: &[(String, Vec<(String, i64, String)>)]) -> Res
 
         for (author, mut branches) in author_branches {
             // Sort branches by days (descending - oldest first)
-            branches.sort_by(|a, b| b.1.cmp(&a.1));
+            branches.sort_by_key(|a| std::cmp::Reverse(a.1));
 
             let branch_maps: Vec<HashMap<String, i64>> = branches
                 .into_iter()
@@ -360,7 +360,7 @@ mod tests {
 
             for (author, mut branches) in author_branches {
                 // Sort branches by days (descending - oldest first)
-                branches.sort_by(|a, b| b.1.cmp(&a.1));
+                branches.sort_by_key(|a| std::cmp::Reverse(a.1));
 
                 let branch_maps: Vec<HashMap<String, i64>> = branches
                     .into_iter()
