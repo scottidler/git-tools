@@ -216,6 +216,9 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
     debug!("Executing git command with args: {:?}", command_args);
 
     let output = git::output(&command_args, None, None).wrap_err("Failed to execute ls-remote")?;
+    if !output.status.success() {
+        return Err(eyre!("git ls-remote failed for {}: {}", repo_url, output.stderr.trim()));
+    }
 
     debug!("ls-remote output: {:?}", output.stdout);
 

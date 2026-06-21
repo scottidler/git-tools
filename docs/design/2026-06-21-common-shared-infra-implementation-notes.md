@@ -179,6 +179,44 @@ from `2026-06-21-common-shared-infra.md`.
 ### Open questions
 - None.
 
+## Post-audit fixes (Architect + Staff Engineer implementation audits)
+
+Two independent audits (Gemini Architect, Codex Staff Engineer) reviewed the
+branch. Both confirmed behavior parity and the core migration as correct
+(scan-depth parity, runner semantics, parser promotion, tolerated `fetch
+--prune`, `git2` purge, edition bumps). Acted on the findings I agreed with:
+
+### Fixed
+- **`fetch_revision_sha` ignored the `output()` contract** (Staff Eng #2, the
+  strongest finding). `common::git::output` treats a non-zero exit as data, so a
+  failed `ls-remote` produced a generic "Could not find SHA for HEAD" and
+  swallowed stderr. Added a `.status.success()` check that surfaces the captured
+  stderr (`clone/src/main.rs::fetch_revision_sha`).
+- **`get_repo_slug_from_path` still hand-rolled `Command::new("git")`** (both
+  audits). Routed it through `common::git::output`
+  (`common/src/git/url_parser.rs`) so its failure path carries stderr like every
+  other call site, and dropped the now-unused `Command`/`Context` imports.
+- **Missing non-GitHub `get_repo_slug_from_path` test** (Staff Eng #6, a named
+  Testing-Strategy item). Added a fixture test that inits a repo with a
+  `git@gitlab.com:...` origin and asserts the host-agnostic slug.
+
+### Acknowledged, intentionally not changed
+- **`parse_repospec("org/repo/extra")` now yields `org/repo`** (Staff Eng #4).
+  This is the RepoSpec two-component contract (already noted in Phase 2); the
+  explicit plain-input delta vs. clone's old whole-string return is recorded here
+  for completeness. Aligns with the doc's intent.
+- **`from_bare_container` does not existence-check the joined worktree path**
+  (Staff Eng #5). No bare containers exist until the worktree doc executes, and
+  `default_branch` errors if the bare HEAD won't resolve. The worktree doc's
+  Phase 2 guarantees the default worktree is created; a guard belongs there.
+- **`slug_from_path` `unknown/unknown` fallback** (Staff Eng #3). Pre-existing
+  code on `main`, untouched by this work and out of scope for this design doc.
+- **`log::init` has only an idempotence test, not the doc's "path resolution
+  behind ENV_LOCK" test** (Staff Eng #6). Our `log::init` does no path
+  resolution — it targets stderr by design (an explicit Phase 2 deviation), so
+  the path-resolution test does not apply; the idempotence test covers the
+  load-bearing `try_init` behavior.
+
 ## Phase 6: Remove duplicates, retire shims, drop git2
 
 ### Design decisions
