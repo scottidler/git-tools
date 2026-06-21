@@ -1,32 +1,34 @@
-use eyre::{Context, Result};
+use eyre::Result;
 use std::path::Path;
-use std::process::Command;
 
-/// Parse a Git remote URL into `owner/repo` format
-/// Supports SSH, HTTPS, and ssh:// GitHub URLs
+/// Parse a Git remote URL into `owner/repo` format.
+///
+/// Thin shim over the host-agnostic [`crate::git::parse_repospec`] (slated for
+/// retirement in Phase 6 if unused). Returns `None` on any unparseable input,
+/// preserving the original `Option`-returning contract while gaining GitLab /
+/// Bitbucket / enterprise support for free.
 pub fn parse_git_url(url: &str) -> Option<String> {
-    url.strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("https://github.com/"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .map(|rest| rest.trim_end_matches(".git").to_string())
+    crate::git::parse_repospec(url).ok().map(|spec| spec.to_string())
 }
 
-/// Get the repository slug from a path by querying git remote
+/// Get the repository slug from a path by querying git remote.
+///
+/// Routes through the shared `git::output` runner so the failure path carries
+/// captured stderr like every other call site.
 pub fn get_repo_slug_from_path<P: AsRef<Path>>(path: P) -> Result<String> {
     let repo_dir = path.as_ref();
 
-    let url_out = Command::new("git")
-        .current_dir(repo_dir)
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .context("git remote get-url failed")?;
-
+    let url_out = crate::git::output(&["remote", "get-url", "origin"], Some(repo_dir), None)?;
     if !url_out.status.success() {
-        eyre::bail!("Failed to get git remote URL from {}", repo_dir.display());
+        eyre::bail!(
+            "Failed to get git remote URL from {}: {}",
+            repo_dir.display(),
+            url_out.stderr.trim()
+        );
     }
 
-    let url = String::from_utf8(url_out.stdout)?.trim().to_string();
-    parse_git_url(&url).ok_or_else(|| eyre::eyre!("Failed to parse git URL: {}", url))
+    let url = url_out.stdout.trim();
+    parse_git_url(url).ok_or_else(|| eyre::eyre!("Failed to parse git URL: {}", url))
 }
 
 #[cfg(test)]
@@ -79,5 +81,21 @@ mod tests {
     fn test_parse_git_url_empty() {
         let url = "";
         assert_eq!(parse_git_url(url), None);
+    }
+
+    #[test]
+    fn test_get_repo_slug_from_path_non_github() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::git::run(&["init", "-b", "main"], Some(&repo), None).unwrap();
+        crate::git::run(
+            &["remote", "add", "origin", "git@gitlab.com:someorg/somerepo.git"],
+            Some(&repo),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(get_repo_slug_from_path(&repo).unwrap(), "someorg/somerepo");
     }
 }

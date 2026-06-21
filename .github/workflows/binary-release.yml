@@ -47,7 +47,7 @@ jobs:
       - name: Build and package all subprojects
         run: |
           mkdir -p artifacts/
-          for project in clone filter-ref ls-github-repos reposlug stale-branches; do
+          for project in clone reposlug ls-git-repos ls-github-repos ls-owners ls-stale-branches ls-stale-prs; do
             echo "Building $project..."
             cargo build --release --manifest-path "$project/Cargo.toml" --target ${{ matrix.target }}
             cp target/${{ matrix.target }}/release/$project artifacts/

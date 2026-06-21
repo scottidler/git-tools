@@ -6,7 +6,6 @@ A Rust workspace of CLI tools for git repository discovery, analysis, and manage
 
 - **`common/`** - Shared library with git URL parsing, repo discovery, language detection, and parallel execution
 - **`clone/`** - Clone repos from various spec formats (org/repo, SSH, HTTPS)
-- **`filter-ref/`** - Analyze git refs with age/author filtering
 - **`ls-git-repos/`** - Recursively discover local git repos with language filtering
 - **`ls-github-repos/`** - List GitHub org/user repos via API with language filtering
 - **`ls-owners/`** - Detect CODEOWNERS files and identify un-owned code paths
@@ -84,11 +83,16 @@ linked, edit `manifest.yml` and run `manifest`; do not hand-edit the symlinks.
 - **Error handling**: `eyre::Result<T>` everywhere
 - **CLI**: `clap` derive macros with `--version` showing `git describe` output
 - **Parallelism**: `rayon` for CPU-bound work, `ParallelExecutor` from common
-- **Repo discovery**: `RepoDiscovery` scans up to 2 levels deep for `.git/` dirs
+- **Repo discovery**: `RepoDiscovery` scans `max_depth` levels (default 2, `None`
+  = unbounded) for `.git` (dir or file) and bare containers (`.bare/`)
 - **Slug format**: Always `owner/repo` - derived from git remote URL or filesystem path fallback
-- **URL parsing**: `parse_git_url()` handles `git@github.com:`, `https://github.com/`, and `ssh://git@github.com/`
+- **Git invocation**: route through `common::git::run` (mutations) / `common::git::output`
+  (reads); never hand-roll `Command::new("git")` in production code
+- **URL parsing**: `common::git::parse_repospec()` is the host-agnostic parser
+  (GitHub/GitLab/Bitbucket/enterprise, all URL forms) returning `RepoSpec`;
+  `parse_git_url()` is a thin `Option`-returning shim over it
 - **Config**: YAML for all configuration (never TOML for config files)
-- **Logging**: `env_logger` + `log` macros
+- **Logging**: `--log-level` flag (per crate) wired to `common::log::init`; stderr target, no `RUST_LOG`
 - **Tests**: `#[cfg(test)]` modules with `tempfile` for fixtures
 - **Versions**: All crates synchronized at same version, released together
 
@@ -99,9 +103,12 @@ linked, edit `manifest.yml` and run `manifest`; do not hand-edit the symlinks.
 
 ## Common Crate Modules
 
-- `git::parse_git_url(url) -> Option<String>` - URL to owner/repo
-- `repo::RepoInfo` - path + slug for a repo
-- `repo::RepoDiscovery` - find repos under paths with smart matching
+- `git::parse_repospec(input) -> Result<RepoSpec>` - host-agnostic parser (all URL forms); `git::slugify_branch` lowercase-hyphenates a branch name
+- `git::parse_git_url(url) -> Option<String>` - thin shim over `parse_repospec`; `git::get_repo_slug_from_path` reads `origin` from disk
+- `git::run` / `git::output` - the single git-command runner (captured stderr, env overrides, `git::ssh_command` for `GIT_SSH_COMMAND`)
+- `log::init(level, project)` - `--log-level` -> stderr, idempotent, no `RUST_LOG`
+- `repo::RepoInfo` - path + slug (+ opt-in `worktree`) for a repo; bare containers resolve `path` to the default-branch worktree
+- `repo::RepoDiscovery` - find repos under paths (`with_max_depth`, `with_per_worktree`), bare-container aware
 - `language::detect_language(path) -> Option<String>` - three-stage detection (markers, extensions, fallback)
 - `parallel::ParallelExecutor` - rayon-based parallel repo processing
 

@@ -2,117 +2,16 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use clap::Parser;
-use eyre::{eyre, Result, WrapErr};
+use common::git;
+use eyre::{Result, WrapErr, eyre};
 use ini::ini;
-use log::{debug, warn};
+use log::{LevelFilter, debug, warn};
 
 const REMOTE_URLS: [&str; 2] = ["ssh://git@github.com", "https://github.com"];
 
-/// Parse a repository specification from various formats into org/repo format.
-///
-/// Supported formats:
-/// - `org/repo` - Simple format (pass through)
-/// - `https://github.com/org/repo` or `https://github.com/org/repo.git` - HTTPS URL
-/// - `git@github.com:org/repo` or `git@github.com:org/repo.git` - SCP-style SSH
-/// - `ssh://git@github.com/org/repo` or `ssh://git@github.com/org/repo.git` - SSH URL
-/// - `git://github.com/org/repo` or `git://github.com/org/repo.git` - Git protocol URL
-pub fn parse_repospec(input: &str) -> Result<String> {
-    let input = input.trim();
-
-    if input.is_empty() {
-        return Err(eyre!("Empty repository specification"));
-    }
-
-    // Remove trailing .git if present
-    let input = input.strip_suffix(".git").unwrap_or(input);
-
-    // HTTPS URL: https://github.com/org/repo
-    if input.starts_with("https://") || input.starts_with("http://") {
-        let without_protocol = input
-            .strip_prefix("https://")
-            .or_else(|| input.strip_prefix("http://"))
-            .unwrap();
-        let parts: Vec<&str> = without_protocol.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            return extract_org_repo_from_path(parts[1]);
-        }
-        return Err(eyre!("Invalid HTTPS URL: missing path"));
-    }
-
-    // SSH URL: ssh://git@github.com/org/repo
-    if input.starts_with("ssh://") {
-        let without_protocol = input.strip_prefix("ssh://").unwrap();
-        let parts: Vec<&str> = without_protocol.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            return extract_org_repo_from_path(parts[1]);
-        }
-        return Err(eyre!("Invalid SSH URL: missing path"));
-    }
-
-    // Git protocol URL: git://github.com/org/repo
-    if input.starts_with("git://") {
-        let without_protocol = input.strip_prefix("git://").unwrap();
-        let parts: Vec<&str> = without_protocol.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            return extract_org_repo_from_path(parts[1]);
-        }
-        return Err(eyre!("Invalid git URL: missing path"));
-    }
-
-    // SCP-style SSH: git@github.com:org/repo
-    if input.contains('@') && input.contains(':') {
-        let parts: Vec<&str> = input.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            return extract_org_repo_from_path(parts[1]);
-        }
-        return Err(eyre!("Invalid SCP-style URL: missing colon separator"));
-    }
-
-    // Simple org/repo format - validate it has a slash with content on both sides
-    if input.contains('/') {
-        let parts: Vec<&str> = input.splitn(2, '/').collect();
-        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            let org = parts[0];
-            let repo = parts[1];
-            if !org.contains(':') && !repo.contains(':') {
-                return Ok(input.to_string());
-            }
-        }
-    }
-
-    Err(eyre!(
-        "Invalid repository specification: '{}'. Expected formats:\n\
-         - org/repo\n\
-         - https://github.com/org/repo\n\
-         - git@github.com:org/repo\n\
-         - ssh://git@github.com/org/repo\n\
-         - git://github.com/org/repo",
-        input
-    ))
-}
-
-/// Extract org/repo from a path, handling extra path components
-fn extract_org_repo_from_path(path: &str) -> Result<String> {
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let path = path.trim_start_matches('/');
-
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 2 {
-        return Err(eyre!("Invalid path: expected org/repo format, got '{}'", path));
-    }
-
-    let org = parts[0];
-    let repo = parts[1];
-
-    if org.is_empty() || repo.is_empty() {
-        return Err(eyre!("Invalid path: org or repo is empty"));
-    }
-
-    Ok(format!("{}/{}", org, repo))
-}
+// The repospec parser (parse_repospec / RepoSpec) now lives in common::git.
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
@@ -122,6 +21,9 @@ fn extract_org_repo_from_path(path: &str) -> Result<String> {
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 struct Cli {
+    #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
+    log_level: LevelFilter,
+
     #[arg(
         help = "Repository specification. Accepts: org/repo, https://github.com/org/repo, git@github.com:org/repo, ssh://git@github.com/org/repo, git://github.com/org/repo",
         required = true
@@ -148,13 +50,13 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
-
     let cli = Cli::parse();
+    common::log::init(cli.log_level, "clone")?;
 
     // Parse the repospec to handle various URL formats (URL -> org/repo)
-    let repospec = parse_repospec(&cli.repospec)
-        .wrap_err_with(|| format!("Failed to parse repository specification: {}", cli.repospec))?;
+    let repospec = git::parse_repospec(&cli.repospec)
+        .wrap_err_with(|| format!("Failed to parse repository specification: {}", cli.repospec))?
+        .to_string();
 
     let full_clone_path = PathBuf::from(&cli.clonepath).join(&repospec);
 
@@ -170,44 +72,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Run `git <args…>`, silencing output, with optional environment overrides.
-fn git(args: &[&str], envs: Option<&[(&str, &str)]>) -> Result<()> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Some(env_pairs) = envs {
-        for (k, v) in env_pairs {
-            cmd.env(k, v);
-        }
-    }
-    let status = cmd.status().wrap_err_with(|| format!("git {:?} failed", args))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(eyre!("git {:?} exited {}", args, status))
-    }
-}
-
 fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     std::env::set_current_dir(full_clone_path).wrap_err("Failed to set current directory")?;
 
     // Check if repo has any commits (handles empty repos from failed clones)
-    let head_check = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let head_ok = git::output(&["rev-parse", "HEAD"], None, None)
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
-    if !matches!(head_check, Ok(status) if status.success()) {
+    if !head_ok {
         // No commits - try to fetch from remote and reset to remote branch
-        let fetch_result = Command::new("git")
-            .args(["fetch", "origin"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        if !matches!(fetch_result, Ok(status) if status.success()) {
+        if git::run(&["fetch", "origin"], None, None).is_err() {
             return Err(eyre!(
                 "Repository exists but has no commits and fetch failed. \
                  Remove {} and try again.",
@@ -216,13 +91,7 @@ fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
         }
 
         // Reset local branch to remote (fixes empty repo from failed clone)
-        let reset_result = Command::new("git")
-            .args(["reset", "--hard", "origin/HEAD"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        if !matches!(reset_result, Ok(status) if status.success()) {
+        if git::run(&["reset", "--hard", "origin/HEAD"], None, None).is_err() {
             return Err(eyre!(
                 "Repository exists but failed to reset to remote. \
                  Remove {} and try again.",
@@ -235,12 +104,9 @@ fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     }
 
     // Check for untracked files
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .wrap_err("Failed to check git status")?;
-
-    let status_str = String::from_utf8_lossy(&status_output.stdout);
+    let status_str = git::output(&["status", "--porcelain"], None, None)
+        .wrap_err("Failed to check git status")?
+        .stdout;
     let has_untracked = status_str.lines().any(|line| line.starts_with("??"));
 
     if has_untracked {
@@ -260,12 +126,12 @@ fn update_existing_repo(full_clone_path: &Path, revision: &str) -> Result<()> {
     // Check for uncommitted changes and stash them
     let has_changes = !status_str.is_empty();
     if has_changes {
-        git(&["stash", "push", "-m", "Automatic stash by clone tool"], None)?;
+        git::run(&["stash", "push", "-m", "Automatic stash by clone tool"], None, None)?;
         eprintln!("Note: Uncommitted changes have been stashed. Use 'git stash pop' to restore them.");
     }
 
-    git(&["checkout", revision], None)?;
-    git(&["pull"], None)?;
+    git::run(&["checkout", revision], None, None)?;
+    git::run(&["pull"], None, None)?;
     Ok(())
 }
 
@@ -319,14 +185,11 @@ fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<PathBuf> {
     }
 
     // Verify clone actually fetched commits (handles partial clone failures)
-    let head_check = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&full_clone_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let head_ok = git::output(&["rev-parse", "HEAD"], Some(&full_clone_path), None)
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
-    if !matches!(head_check, Ok(status) if status.success()) {
+    if !head_ok {
         // Clone left an empty repo - clean up and return error
         std::fs::remove_dir_all(&full_clone_path).ok();
         return Err(eyre!(
@@ -339,8 +202,8 @@ fn clone_new_repo(cli: &Cli, repospec: &str) -> Result<PathBuf> {
     std::env::set_current_dir(&full_clone_path).wrap_err("Failed to change directory into cloned repo")?;
 
     // Checkout requested revision and clean workspace
-    git(&["checkout", &revision], None)?;
-    git(&["clean", "-xfd"], None)?;
+    git::run(&["checkout", &revision], None, None)?;
+    git::run(&["clean", "-xfd"], None, None)?;
 
     Ok(full_clone_path)
 }
@@ -352,16 +215,15 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
     let command_args = ["ls-remote", &repo_url, "HEAD"];
     debug!("Executing git command with args: {:?}", command_args);
 
-    let output = Command::new("git")
-        .args(command_args)
-        .stdout(Stdio::null())
-        .output()
-        .wrap_err("Failed to execute ls-remote")?;
+    let output = git::output(&command_args, None, None).wrap_err("Failed to execute ls-remote")?;
+    if !output.status.success() {
+        return Err(eyre!("git ls-remote failed for {}: {}", repo_url, output.stderr.trim()));
+    }
 
-    debug!("ls-remote output: {:?}", String::from_utf8_lossy(&output.stdout));
+    debug!("ls-remote output: {:?}", output.stdout);
 
-    let output_str = String::from_utf8(output.stdout).wrap_err("Failed to parse ls-remote output")?;
-    let sha = output_str
+    let sha = output
+        .stdout
         .lines()
         .filter(|line| line.contains("HEAD"))
         .filter_map(|line| line.split_whitespace().next())
@@ -391,9 +253,10 @@ fn attempt_clone_with_ssh(
     }
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = git(
+    let result = git::run(
         &arg_refs,
-        Some(&[("GIT_SSH_COMMAND", &format!("/usr/bin/ssh -i {}", ssh_key))]),
+        None,
+        Some(&[("GIT_SSH_COMMAND", &git::ssh_command(ssh_key))]),
     );
 
     match result {
@@ -430,7 +293,7 @@ fn attempt_clone(
     }
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = git(&arg_refs, None);
+    let result = git::run(&arg_refs, None, None);
 
     match result {
         Ok(_) => {
@@ -483,166 +346,7 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
-    // ============================================
-    // Tests for parse_repospec
-    // ============================================
-
-    #[test]
-    fn test_parse_simple_org_repo() {
-        assert_eq!(parse_repospec("scottidler/gx").unwrap(), "scottidler/gx");
-        assert_eq!(parse_repospec("otto-rs/otto").unwrap(), "otto-rs/otto");
-        assert_eq!(parse_repospec("tatari-tv/philo").unwrap(), "tatari-tv/philo");
-    }
-
-    #[test]
-    fn test_parse_https_url() {
-        assert_eq!(
-            parse_repospec("https://github.com/scottidler/gx").unwrap(),
-            "scottidler/gx"
-        );
-        assert_eq!(
-            parse_repospec("https://github.com/otto-rs/otto").unwrap(),
-            "otto-rs/otto"
-        );
-        assert_eq!(
-            parse_repospec("https://github.com/tatari-tv/philo").unwrap(),
-            "tatari-tv/philo"
-        );
-    }
-
-    #[test]
-    fn test_parse_https_url_with_git_suffix() {
-        assert_eq!(
-            parse_repospec("https://github.com/scottidler/gx.git").unwrap(),
-            "scottidler/gx"
-        );
-        assert_eq!(
-            parse_repospec("https://github.com/otto-rs/otto.git").unwrap(),
-            "otto-rs/otto"
-        );
-    }
-
-    #[test]
-    fn test_parse_http_url() {
-        assert_eq!(
-            parse_repospec("http://github.com/scottidler/gx").unwrap(),
-            "scottidler/gx"
-        );
-    }
-
-    #[test]
-    fn test_parse_ssh_url() {
-        assert_eq!(
-            parse_repospec("ssh://git@github.com/scottidler/gx").unwrap(),
-            "scottidler/gx"
-        );
-        assert_eq!(
-            parse_repospec("ssh://git@github.com/otto-rs/otto").unwrap(),
-            "otto-rs/otto"
-        );
-    }
-
-    #[test]
-    fn test_parse_ssh_url_with_git_suffix() {
-        assert_eq!(
-            parse_repospec("ssh://git@github.com/scottidler/gx.git").unwrap(),
-            "scottidler/gx"
-        );
-    }
-
-    #[test]
-    fn test_parse_git_protocol_url() {
-        assert_eq!(
-            parse_repospec("git://github.com/scottidler/gx").unwrap(),
-            "scottidler/gx"
-        );
-        assert_eq!(
-            parse_repospec("git://github.com/otto-rs/otto.git").unwrap(),
-            "otto-rs/otto"
-        );
-    }
-
-    #[test]
-    fn test_parse_scp_style_ssh() {
-        assert_eq!(parse_repospec("git@github.com:scottidler/gx").unwrap(), "scottidler/gx");
-        assert_eq!(parse_repospec("git@github.com:otto-rs/otto").unwrap(), "otto-rs/otto");
-        assert_eq!(
-            parse_repospec("git@github.com:tatari-tv/philo").unwrap(),
-            "tatari-tv/philo"
-        );
-    }
-
-    #[test]
-    fn test_parse_scp_style_ssh_with_git_suffix() {
-        assert_eq!(
-            parse_repospec("git@github.com:scottidler/gx.git").unwrap(),
-            "scottidler/gx"
-        );
-    }
-
-    #[test]
-    fn test_parse_with_whitespace() {
-        assert_eq!(parse_repospec("  scottidler/gx  ").unwrap(), "scottidler/gx");
-        assert_eq!(
-            parse_repospec("\thttps://github.com/scottidler/gx\n").unwrap(),
-            "scottidler/gx"
-        );
-    }
-
-    #[test]
-    fn test_parse_different_hosts() {
-        // GitLab
-        assert_eq!(
-            parse_repospec("https://gitlab.com/someorg/somerepo").unwrap(),
-            "someorg/somerepo"
-        );
-        assert_eq!(
-            parse_repospec("git@gitlab.com:someorg/somerepo.git").unwrap(),
-            "someorg/somerepo"
-        );
-        // Bitbucket
-        assert_eq!(
-            parse_repospec("https://bitbucket.org/someorg/somerepo").unwrap(),
-            "someorg/somerepo"
-        );
-        // Enterprise GitHub
-        assert_eq!(
-            parse_repospec("https://github.enterprise.com/someorg/somerepo").unwrap(),
-            "someorg/somerepo"
-        );
-    }
-
-    #[test]
-    fn test_parse_empty_input() {
-        assert!(parse_repospec("").is_err());
-        assert!(parse_repospec("   ").is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_formats() {
-        // No slash
-        assert!(parse_repospec("justrepo").is_err());
-        // Empty org
-        assert!(parse_repospec("/repo").is_err());
-        // Empty repo
-        assert!(parse_repospec("org/").is_err());
-        // Just a URL without path
-        assert!(parse_repospec("https://github.com").is_err());
-        assert!(parse_repospec("https://github.com/").is_err());
-    }
-
-    #[test]
-    fn test_parse_url_with_extra_path_components() {
-        // URLs might have extra path components after org/repo
-        assert_eq!(
-            parse_repospec("https://github.com/scottidler/gx/tree/main").unwrap(),
-            "scottidler/gx"
-        );
-        assert_eq!(
-            parse_repospec("https://github.com/scottidler/gx/blob/main/README.md").unwrap(),
-            "scottidler/gx"
-        );
-    }
+    // parse_repospec tests live in common::git::spec now (the parser moved there).
 
     // ============================================
     // Original tests for find_ssh_key_for_org
@@ -691,13 +395,13 @@ mod tests {
         writeln!(file, "[org.testorg]").unwrap();
         writeln!(file, "sshkey = /path/to/key").unwrap();
 
-        std::env::set_var("CLONE_CFG", config_path.to_str().unwrap());
+        unsafe { std::env::set_var("CLONE_CFG", config_path.to_str().unwrap()) };
 
         let result = find_ssh_key_for_org("testorg/repo");
 
         // Clean up
         fs::remove_dir_all(&temp_dir).ok();
-        std::env::remove_var("CLONE_CFG");
+        unsafe { std::env::remove_var("CLONE_CFG") };
 
         assert!(result.is_ok());
         if let Ok(Some(key)) = result {

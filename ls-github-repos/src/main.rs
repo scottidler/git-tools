@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use common::language::matches_language;
 use eyre::{Result, eyre};
-use log::debug;
+use log::{LevelFilter, debug};
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,6 +18,10 @@ use std::{env, fmt, fs};
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 struct Cli {
+    // `-l` is taken by `--lang`, so log-level is long-only here.
+    #[arg(long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
+    log_level: LevelFilter,
+
     #[clap(value_parser)]
     name: String,
 
@@ -101,8 +105,8 @@ fn resolve_token(name: &str, token_path: &str) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
     let args = Cli::parse();
+    common::log::init(args.log_level, "ls-github-repos")?;
 
     let token = resolve_token(&args.name, &args.token_path)?;
 

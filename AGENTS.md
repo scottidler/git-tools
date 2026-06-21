@@ -18,21 +18,27 @@ All tools are Rust CLI binaries sharing a common library. When making changes:
 
 ## Git Remote URL Formats
 
-The `common::git::parse_git_url` function handles three GitHub URL formats:
-- `git@github.com:owner/repo.git` (SSH shorthand)
-- `https://github.com/owner/repo.git` (HTTPS)
-- `ssh://git@github.com/owner/repo.git` (SSH protocol)
-
-If you add a new URL format, add tests in `common/src/git/url_parser.rs`.
+The host-agnostic parser is `common::git::parse_repospec` (in
+`common/src/git/spec.rs`), returning `RepoSpec { org, repo }`. It handles
+`org/repo`, `https://`, `http://`, `git@host:org/repo` (SCP-style), `ssh://`,
+and `git://`, with `.git` stripping and extra-path-segment tolerance, for any
+host (GitHub/GitLab/Bitbucket/enterprise). `common::git::parse_git_url` is a thin
+`Option`-returning shim over it. If you add a new URL format, add tests in
+`common/src/git/spec.rs`.
 
 When URL parsing fails, `slug_from_path()` derives org/repo from the filesystem path. Never fall back to hardcoded `"unknown/unknown"`.
 
+All git subprocesses route through `common::git::run` / `common::git::output`;
+do not hand-roll `Command::new("git")` in production code.
+
 ## Repo Discovery
 
-`RepoDiscovery` scans up to 2 levels deep (handles `~/repos/org/repo` layout). It:
-- Checks if a path itself is a git repo
-- Scans first-level children
-- Scans second-level children (for org/ directories)
+`RepoDiscovery` scans `max_depth` levels (default 2, handles `~/repos/org/repo`;
+`with_max_depth(None)` is unbounded). It:
+- Recognizes a `.git` directory or file, and bare containers (`.bare/`)
+- Stops descending once a path is recognized as a repo or bare container
+- Emits one `RepoInfo` per logical repo (bare container `path` = its
+  default-branch worktree); per-worktree rows are opt-in via `with_per_worktree`
 
 ## Testing
 
