@@ -43,6 +43,12 @@ pub struct Cli {
     )]
     pub worktree: Option<String>,
 
+    #[arg(
+        long,
+        help = "convert an existing flat checkout into a bare container (requires a clean tree)"
+    )]
+    pub migrate: bool,
+
     #[arg(long, help = "turn on versioning; checkout in reponame/commit rather than reponame")]
     pub versioning: bool,
 

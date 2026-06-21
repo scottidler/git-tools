@@ -72,8 +72,9 @@ pub fn reconcile_container(config: &Config, container: &Path) -> Result<PathBuf>
     ensure_default_worktree(config, container)
 }
 
-/// Write `<container>/.git` containing the bare pointer line.
-fn write_git_pointer(container: &Path) -> Result<()> {
+/// Write `<container>/.git` containing the bare pointer line. The pointer is
+/// relative (`gitdir: ./.bare`), so it survives a container rename.
+pub(crate) fn write_git_pointer(container: &Path) -> Result<()> {
     let pointer = container.join(".git");
     fs::write(&pointer, "gitdir: ./.bare\n").wrap_err_with(|| format!("writing {:?}", pointer))?;
     Ok(())

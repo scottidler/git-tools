@@ -27,6 +27,8 @@ pub enum Op {
     /// Add a worktree for the given (raw) branch argument to an existing bare
     /// container. `spec` is optional (derived from CWD when absent).
     AddWorktree(String),
+    /// Convert an existing flat checkout into a bare container. Requires `spec`.
+    Migrate,
 }
 
 /// Validated, resolved configuration consumed by [`crate::run`].
@@ -63,20 +65,26 @@ impl TryFrom<Cli> for Config {
             None => None,
         };
 
-        let op = match cli.worktree {
-            Some(branch) => Op::AddWorktree(branch),
-            None => Op::Clone,
+        if cli.worktree.is_some() && cli.migrate {
+            return Err(eyre!("--worktree cannot be combined with --migrate"));
+        }
+
+        let op = match (cli.worktree, cli.migrate) {
+            (Some(branch), _) => Op::AddWorktree(branch),
+            (None, true) => Op::Migrate,
+            (None, false) => Op::Clone,
         };
 
-        // Validation: a plain clone needs a repospec; --worktree can derive its
-        // container from CWD, so a repospec is optional there.
-        if op == Op::Clone && spec.is_none() {
+        // Validation: clone and migrate need a repospec; --worktree can derive
+        // its container from CWD, so a repospec is optional there.
+        if matches!(op, Op::Clone | Op::Migrate) && spec.is_none() {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
 
-        // --flat selects the legacy layout, which has no worktrees to add to.
-        if cli.flat && matches!(op, Op::AddWorktree(_)) {
-            return Err(eyre!("--flat cannot be combined with --worktree"));
+        // --flat selects the legacy layout, which has no worktrees and nothing
+        // to migrate to.
+        if cli.flat && matches!(op, Op::AddWorktree(_) | Op::Migrate) {
+            return Err(eyre!("--flat cannot be combined with --worktree or --migrate"));
         }
 
         let ssh_key = match &spec {

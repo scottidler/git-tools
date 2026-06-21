@@ -3,6 +3,7 @@
 pub mod bare;
 pub mod cli;
 pub mod config;
+pub mod migrate;
 pub mod transport;
 pub mod worktree;
 
@@ -30,6 +31,14 @@ pub fn run(config: Config) -> Result<PathBuf> {
             run_clone(&config, &spec)
         }
         Op::AddWorktree(branch) => worktree::add(&config, branch),
+        Op::Migrate => {
+            let spec = config
+                .spec
+                .clone()
+                .expect("Op::Migrate requires a spec (enforced in Config::try_from)");
+            let flat = config.clonepath.join(spec.to_string());
+            migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
+        }
     }
 }
 
