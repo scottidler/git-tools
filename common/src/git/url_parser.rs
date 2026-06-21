@@ -2,13 +2,14 @@ use eyre::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-/// Parse a Git remote URL into `owner/repo` format
-/// Supports SSH, HTTPS, and ssh:// GitHub URLs
+/// Parse a Git remote URL into `owner/repo` format.
+///
+/// Thin shim over the host-agnostic [`crate::git::parse_repospec`] (slated for
+/// retirement in Phase 6 if unused). Returns `None` on any unparseable input,
+/// preserving the original `Option`-returning contract while gaining GitLab /
+/// Bitbucket / enterprise support for free.
 pub fn parse_git_url(url: &str) -> Option<String> {
-    url.strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("https://github.com/"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .map(|rest| rest.trim_end_matches(".git").to_string())
+    crate::git::parse_repospec(url).ok().map(|spec| spec.to_string())
 }
 
 /// Get the repository slug from a path by querying git remote

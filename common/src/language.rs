@@ -68,10 +68,10 @@ pub fn detect_language(repo_path: &Path) -> Option<String> {
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                if let Some(name) = e.file_name().to_str() {
-                    return !CONFIG.skip_dirs.iter().any(|d| d == name);
-                }
+            if e.file_type().is_dir()
+                && let Some(name) = e.file_name().to_str()
+            {
+                return !CONFIG.skip_dirs.iter().any(|d| d == name);
             }
             true
         })
