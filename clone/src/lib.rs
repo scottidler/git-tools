@@ -4,33 +4,48 @@ pub mod bare;
 pub mod cli;
 pub mod config;
 pub mod transport;
+pub mod worktree;
 
 pub use cli::Cli;
-pub use config::{Config, Layout};
+pub use config::{Config, Layout, Op};
 
 use std::path::{Path, PathBuf};
 
-use common::git;
+use common::git::{self, RepoSpec};
 use eyre::{Result, WrapErr, eyre};
 use log::debug;
 
 /// Transport URLs tried in order: SSH first, then HTTPS as a fallback.
 pub const REMOTE_URLS: [&str; 2] = ["ssh://git@github.com", "https://github.com"];
 
-/// Clone (or update) the repository described by `config`, returning the
-/// destination path the shell wrapper should `cd` into.
+/// Execute the operation described by `config`, returning the destination path
+/// the shell wrapper should `cd` into.
 pub fn run(config: Config) -> Result<PathBuf> {
-    let repospec = config.spec.to_string();
+    match &config.op {
+        Op::Clone => {
+            let spec = config
+                .spec
+                .clone()
+                .expect("Op::Clone requires a spec (enforced in Config::try_from)");
+            run_clone(&config, &spec)
+        }
+        Op::AddWorktree(branch) => worktree::add(&config, branch),
+    }
+}
+
+/// Clone (or update) `spec`, dispatching on the resolved layout.
+fn run_clone(config: &Config, spec: &RepoSpec) -> Result<PathBuf> {
+    let repospec = spec.to_string();
     debug!(
-        "run: repospec={} clonepath={:?} layout={:?}",
+        "run_clone: repospec={} clonepath={:?} layout={:?}",
         repospec, config.clonepath, config.layout
     );
 
     let target = config.clonepath.join(&repospec);
 
     match config.layout {
-        Layout::Flat => clone_or_update_flat(&config, &repospec, &target),
-        Layout::Bare => run_bare(&config, &repospec, &target),
+        Layout::Flat => clone_or_update_flat(config, &repospec, &target),
+        Layout::Bare => run_bare(config, spec, &repospec, &target),
     }
 }
 
@@ -40,7 +55,7 @@ pub fn run(config: Config) -> Result<PathBuf> {
 /// - an existing *flat* checkout (not yet migrated) → update it in place and
 ///   hint at `--migrate`, never silently convert;
 /// - otherwise → set up a fresh bare container.
-fn run_bare(config: &Config, repospec: &str, target: &Path) -> Result<PathBuf> {
+fn run_bare(config: &Config, spec: &RepoSpec, repospec: &str, target: &Path) -> Result<PathBuf> {
     if bare::is_bare_container(target) {
         return bare::reconcile_container(config, target);
     }
@@ -55,7 +70,7 @@ fn run_bare(config: &Config, repospec: &str, target: &Path) -> Result<PathBuf> {
         return Ok(dest);
     }
 
-    bare::setup_bare_container(config)
+    bare::setup_bare_container(config, spec)
 }
 
 /// Flat-layout: update an existing non-empty checkout, else fresh flat clone.

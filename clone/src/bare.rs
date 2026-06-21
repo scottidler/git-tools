@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::git;
+use common::git::{self, RepoSpec};
 use eyre::{Result, WrapErr, eyre};
 use log::{debug, warn};
 
@@ -23,11 +23,11 @@ pub fn is_bare_container(path: &Path) -> bool {
     path.join(".bare").is_dir()
 }
 
-/// Set up a fresh bare container for `config.spec`, returning the canonical
+/// Set up a fresh bare container for `spec`, returning the canonical
 /// default-branch worktree path the wrapper `cd`s into (or the container itself
 /// for a commitless remote).
-pub fn setup_bare_container(config: &Config) -> Result<PathBuf> {
-    let repospec = config.spec.to_string();
+pub fn setup_bare_container(config: &Config, spec: &RepoSpec) -> Result<PathBuf> {
+    let repospec = spec.to_string();
     let container = config.clonepath.join(&repospec);
     let bare = container.join(".bare");
     debug!("setup_bare_container: repospec={} container={:?}", repospec, container);

@@ -19,14 +19,26 @@ pub enum Layout {
     Flat,
 }
 
+/// The operation `clone` performs this invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    /// Clone (or update) a repository. Requires `spec`.
+    Clone,
+    /// Add a worktree for the given (raw) branch argument to an existing bare
+    /// container. `spec` is optional (derived from CWD when absent).
+    AddWorktree(String),
+}
+
 /// Validated, resolved configuration consumed by [`crate::run`].
 ///
 /// `Cli` is parsing only; `Config` carries the parsed `RepoSpec`, expanded
-/// paths, the resolved layout, and the per-org SSH key resolved from
-/// `clone.cfg`.
+/// paths, the resolved layout + operation, and the per-org SSH key resolved
+/// from `clone.cfg`.
 #[derive(Debug)]
 pub struct Config {
-    pub spec: RepoSpec,
+    /// `None` only for `--worktree` run inside a container (no `org/repo` arg).
+    pub spec: Option<RepoSpec>,
+    pub op: Op,
     pub layout: Layout,
     pub revision: String,
     pub remote: String,
@@ -44,14 +56,39 @@ impl TryFrom<Cli> for Config {
     type Error = eyre::Report;
 
     fn try_from(cli: Cli) -> Result<Self> {
-        let spec = git::parse_repospec(&cli.repospec)
-            .wrap_err_with(|| format!("Failed to parse repository specification: {}", cli.repospec))?;
-        let ssh_key = find_ssh_key_for_org(&spec.org)?.map(PathBuf::from);
+        let spec = match &cli.repospec {
+            Some(s) => Some(
+                git::parse_repospec(s).wrap_err_with(|| format!("Failed to parse repository specification: {}", s))?,
+            ),
+            None => None,
+        };
+
+        let op = match cli.worktree {
+            Some(branch) => Op::AddWorktree(branch),
+            None => Op::Clone,
+        };
+
+        // Validation: a plain clone needs a repospec; --worktree can derive its
+        // container from CWD, so a repospec is optional there.
+        if op == Op::Clone && spec.is_none() {
+            return Err(eyre!("a repository specification (org/repo or a URL) is required"));
+        }
+
+        // --flat selects the legacy layout, which has no worktrees to add to.
+        if cli.flat && matches!(op, Op::AddWorktree(_)) {
+            return Err(eyre!("--flat cannot be combined with --worktree"));
+        }
+
+        let ssh_key = match &spec {
+            Some(spec) => find_ssh_key_for_org(&spec.org)?.map(PathBuf::from),
+            None => None,
+        };
         let layout = resolve_layout(cli.flat, cli.versioning, clone_cfg_value("default-layout").as_deref());
         let default_branch = clone_cfg_value("default");
 
         Ok(Self {
             spec,
+            op,
             layout,
             revision: cli.revision,
             remote: cli.remote,

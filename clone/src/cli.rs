@@ -15,10 +15,9 @@ pub struct Cli {
     pub log_level: LevelFilter,
 
     #[arg(
-        help = "Repository specification. Accepts: org/repo, https://github.com/org/repo, git@github.com:org/repo, ssh://git@github.com/org/repo, git://github.com/org/repo",
-        required = true
+        help = "Repository specification. Accepts: org/repo, https://github.com/org/repo, git@github.com:org/repo, ssh://git@github.com/org/repo, git://github.com/org/repo. Optional with --worktree run inside a container."
     )]
-    pub repospec: String,
+    pub repospec: Option<String>,
 
     #[arg(help = "revision to check out", default_value = "HEAD")]
     pub revision: String,
@@ -37,6 +36,12 @@ pub struct Cli {
         help = "use the legacy flat single-checkout layout instead of bare + worktrees"
     )]
     pub flat: bool,
+
+    #[arg(
+        long,
+        help = "add a worktree for <branch> to an existing bare container, then cd into it"
+    )]
+    pub worktree: Option<String>,
 
     #[arg(long, help = "turn on versioning; checkout in reponame/commit rather than reponame")]
     pub versioning: bool,
