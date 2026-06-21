@@ -216,3 +216,32 @@ Running record of how the implementation interprets or diverges from
 
 ### Open questions
 - None.
+
+## Post-implementation audit fixes (Architect + Staff Engineer)
+
+Ran both reviewers in Implementation Audit mode. The Architect found no gaps; the
+Staff Engineer (Codex, runs git/rg) found five issues. All five fixed:
+
+- **Finding 1 (real bug) — migrate picked the wrong default branch.**
+  `migrate_flat_to_bare` derived the default via `bare::default_branch` (HEAD-first),
+  but the bare clone's HEAD reflects the flat repo's *checked-out* branch. Migrating
+  while on `feature/foo` made `feature/foo` the "default" and skipped `main`,
+  violating the always-present-default-worktree invariant. Fixed with a new
+  `origin_default_branch` (populates + reads `origin/HEAD`), `add_default_worktree`
+  (handles a default that exists only as a remote-tracking ref), and a
+  `symbolic-ref HEAD` reset so the cd/z shim + discovery + reconcile agree on the
+  canonical worktree. Regression test:
+  `test_migrate_from_non_default_branch_creates_default_worktree`.
+- **Finding 2 — repair-after-swap had no rollback.** `repair_worktrees(...)?`
+  returned without the rollback the later verify got. Combined repair + re-verify
+  under one rollback block (`migrate.rs`).
+- **Finding 3 — `--versioning --worktree`/`--migrate` slipped through.** `--versioning`
+  implies flat, but the conflict gate only tested explicit `--flat`. Changed to
+  `cli.flat || cli.versioning` (`config.rs`). Regression test:
+  `test_versioning_conflicts_with_worktree_and_migrate`.
+- **Finding 4 — verify() did not assert a clean tree.** Added the empty-`git status`
+  check. **Pushback accepted partially:** kept the origin **URL equality** check
+  (stricter than the reviewer's suggested slug-match), only added cleanliness.
+- **Finding 5 — `--worktree` idempotency could reuse an unrelated dir.**
+  `ensure_or_add` now reuses a same-named path only when it carries a `.git` FILE
+  (a real linked worktree), else errors (`worktree.rs`).

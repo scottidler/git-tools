@@ -84,9 +84,21 @@ fn resolve_container(config: &Config) -> Result<PathBuf> {
 /// just `cd`s into the existing worktree). Returns the worktree path.
 fn ensure_or_add(container: &Path, dir: &str, add_args: &[&str]) -> Result<PathBuf> {
     let worktree = container.join(dir);
-    if worktree.is_dir() {
-        debug!("ensure_or_add: '{}' already exists; reusing", worktree.display());
-        return Ok(worktree);
+    if worktree.exists() {
+        // A linked worktree carries a `.git` FILE (the gitdir pointer). Reuse a
+        // real worktree; refuse to `cd` into an unrelated directory that merely
+        // shares the name.
+        if worktree.join(".git").is_file() {
+            debug!(
+                "ensure_or_add: '{}' is an existing worktree; reusing",
+                worktree.display()
+            );
+            return Ok(worktree);
+        }
+        bail!(
+            "'{}' exists but is not a git worktree; refusing to reuse it",
+            worktree.display()
+        );
     }
     git::run(add_args, Some(container), None)
         .wrap_err_with(|| format!("git {:?} in {}", add_args, container.display()))?;

@@ -72,6 +72,27 @@ fn test_resolve_layout_cfg_default_layout() {
 }
 
 #[test]
+fn test_versioning_conflicts_with_worktree_and_migrate() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // --versioning implies flat, which has no worktrees / nothing to migrate to.
+    let cli = Cli::try_parse_from(["clone", "--versioning", "--worktree", "feat", "org/repo"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--versioning + --worktree should be rejected; got: {err}"
+    );
+
+    let cli = Cli::try_parse_from(["clone", "--versioning", "--migrate", "org/repo"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--versioning + --migrate should be rejected; got: {err}"
+    );
+}
+
+#[test]
 fn test_find_ssh_key_with_custom_config() {
     let _guard = ENV_LOCK.lock().unwrap();
     let prior = std::env::var("CLONE_CFG").ok();

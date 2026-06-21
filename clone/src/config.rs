@@ -81,10 +81,12 @@ impl TryFrom<Cli> for Config {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
 
-        // --flat selects the legacy layout, which has no worktrees and nothing
-        // to migrate to.
-        if cli.flat && matches!(op, Op::AddWorktree(_) | Op::Migrate) {
-            return Err(eyre!("--flat cannot be combined with --worktree or --migrate"));
+        // --flat (explicit, or implied by --versioning) selects the legacy
+        // layout, which has no worktrees and nothing to migrate to.
+        if (cli.flat || cli.versioning) && matches!(op, Op::AddWorktree(_) | Op::Migrate) {
+            return Err(eyre!(
+                "--flat/--versioning cannot be combined with --worktree or --migrate"
+            ));
         }
 
         let ssh_key = match &spec {

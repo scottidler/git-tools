@@ -61,10 +61,21 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     bare::write_git_pointer(&migrating)?;
     bare::fix_fetch_refspec(&migrating)?;
 
-    // 5. Create the always-present default-branch worktree plus, when distinct,
-    //    a worktree for the previously checked-out branch.
-    let default = bare::default_branch(&migrating, default_fallback)?;
-    let mut worktrees = vec![add_worktree(&migrating, &default)?];
+    // 5. Determine the TRUE default branch from the REMOTE. The bare clone's
+    //    HEAD reflects the flat repo's checked-out branch (which may not be the
+    //    default), so HEAD-first detection would pick the wrong branch. Create
+    //    the always-present default-branch worktree, reset the container HEAD to
+    //    it (so the cd/z shim, discovery, and reconcile all agree on the
+    //    canonical worktree), then add the previously checked-out branch too
+    //    when it differs.
+    let default = origin_default_branch(&migrating, default_fallback)?;
+    let mut worktrees = vec![add_default_worktree(&migrating, &default)?];
+    git::run(
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{}", default)],
+        Some(&migrating),
+        None,
+    )
+    .wrap_err("resetting container HEAD to the default branch")?;
     if let Some(cur) = current.as_deref()
         && cur != default
         && cur != "HEAD"
@@ -87,14 +98,14 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     }
 
     // Worktree admin files store absolute paths recorded at the staging path;
-    // repair them to the final location, then re-verify.
-    repair_worktrees(flat, &worktrees)?;
+    // repair them to the final location, then re-verify. A failure in EITHER
+    // step rolls back to the original (backup) so a broken container never
+    // replaces a healthy checkout.
     let final_worktree = flat.join(&default);
-    if let Err(e) = verify(&final_worktree, &origin_url) {
-        // Post-swap verify failed: roll back to the original.
+    if let Err(e) = repair_worktrees(flat, &worktrees).and_then(|()| verify(&final_worktree, &origin_url)) {
         let _ = remove_dir(flat);
         let _ = fs::rename(&backup, flat);
-        return Err(e).wrap_err("migrated container failed verification after swap");
+        return Err(e).wrap_err("migrated container failed repair/verification after swap");
     }
 
     // 7. Migration committed; remove the backup (best-effort - the repo is
@@ -168,9 +179,59 @@ fn warn_dropped_state(flat: &Path) {
     warn!("migrate: machine-local state (extra .git/config remotes, alternates, reflogs) is not migrated");
 }
 
-/// `git worktree add <dir> <dir>` for a same-named branch+dir (the default).
-fn add_worktree(container: &Path, branch: &str) -> Result<PathBuf> {
-    bare::add_worktree(container, branch)
+/// Determine the REMOTE's default branch (not the local checked-out branch):
+/// populate `origin/HEAD` from the remote, read it, and fall back to the
+/// `clone.cfg` default only if the remote advertises none.
+fn origin_default_branch(container: &Path, fallback: Option<&str>) -> Result<String> {
+    let _ = git::run(&["remote", "set-head", "origin", "-a"], Some(container), None);
+    let out = git::output(
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        Some(container),
+        None,
+    )?;
+    if out.status.success() {
+        let branch = out.stdout.trim().trim_start_matches("origin/").to_string();
+        if !branch.is_empty() {
+            return Ok(branch);
+        }
+    }
+    if let Some(f) = fallback {
+        warn!(
+            "migrate: remote advertises no default branch; falling back to clone.cfg default '{}'",
+            f
+        );
+        return Ok(f.to_string());
+    }
+    bail!(
+        "could not determine the remote default branch for '{}'",
+        container.display()
+    )
+}
+
+/// Add the default-branch worktree, handling a default that exists only as a
+/// remote-tracking ref (the flat repo may have deleted its local default).
+fn add_default_worktree(container: &Path, branch: &str) -> Result<PathBuf> {
+    if ref_exists(container, &format!("refs/heads/{}", branch)) {
+        bare::add_worktree(container, branch)
+    } else if ref_exists(container, &format!("refs/remotes/origin/{}", branch)) {
+        let origin_ref = format!("origin/{}", branch);
+        git::run(
+            &["worktree", "add", "-b", branch, "--track", branch, &origin_ref],
+            Some(container),
+            None,
+        )
+        .wrap_err_with(|| format!("git worktree add --track {} in {}", branch, container.display()))?;
+        Ok(container.join(branch))
+    } else {
+        bail!("default branch '{}' not found in the migrated repo", branch)
+    }
+}
+
+/// Whether `refname` resolves in the container's git database.
+fn ref_exists(container: &Path, refname: &str) -> bool {
+    git::output(&["rev-parse", "--verify", "--quiet", refname], Some(container), None)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// `git worktree add <dir> <branch>` keeping the real branch name.
@@ -193,10 +254,17 @@ fn repair_worktrees(container: &Path, staged_worktrees: &[PathBuf]) -> Result<()
     git::run(&args, Some(container), None).wrap_err("repairing worktree links after swap")
 }
 
-/// Verify the container resolves: `git status` succeeds in the worktree and the
-/// origin URL matches what we captured.
+/// Verify the container resolves: `git status` succeeds AND reports a clean tree
+/// in the worktree, and the origin URL matches what we captured.
 fn verify(worktree: &Path, expected_origin: &str) -> Result<()> {
     let status = git::output(&["status", "--porcelain"], Some(worktree), None)?;
+    if !status.stdout.trim().is_empty() {
+        bail!(
+            "verification failed: migrated worktree {} is not clean:\n{}",
+            worktree.display(),
+            status.stdout.trim()
+        );
+    }
     if !status.status.success() {
         bail!(
             "verification failed: 'git status' did not succeed in {}",

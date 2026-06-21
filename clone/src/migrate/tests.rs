@@ -136,6 +136,48 @@ fn test_migrate_preserves_clean_but_ahead_commits() {
 }
 
 #[test]
+fn test_migrate_from_non_default_branch_creates_default_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // Check out a NON-default branch with an unpushed commit and leave it active.
+    git_run(&flat, &["checkout", "-b", "feature"]);
+    fs::write(flat.join("f.txt"), "feature work").unwrap();
+    git_run(&flat, &["add", "."]);
+    commit(&flat, "feature commit");
+
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+
+    // The canonical worktree must be the TRUE default (main), not the
+    // checked-out feature branch (the Finding 1 bug).
+    assert_eq!(worktree, flat.join("main"), "default worktree must be main");
+    assert!(flat.join("main").is_dir(), "default-branch worktree must be present");
+    assert!(
+        flat.join("feature").is_dir(),
+        "previously checked-out branch must also get a worktree"
+    );
+
+    // Container HEAD must be reset to the default so the cd/z shim + discovery
+    // resolve the right canonical worktree.
+    let head = git::output(&["symbolic-ref", "--short", "HEAD"], Some(&flat), None).unwrap();
+    assert_eq!(
+        head.stdout.trim(),
+        "main",
+        "container HEAD must point to the default branch"
+    );
+
+    // The feature branch's unpushed commit survived.
+    let log = git::output(&["log", "--oneline", "-1", "feature"], Some(&flat), None).unwrap();
+    assert!(
+        log.stdout.contains("feature commit"),
+        "feature's unpushed commit must survive; got: {:?}",
+        log.stdout
+    );
+}
+
+#[test]
 fn test_migrate_preserves_local_only_branch() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
