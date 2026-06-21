@@ -3,7 +3,7 @@ use clap::Parser;
 use common::parallel::ParallelExecutor;
 use common::repo::RepoDiscovery;
 use eyre::{Context, Result};
-use log::debug;
+use log::{LevelFilter, debug};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -14,6 +14,9 @@ use std::process::Command;
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(version = env!("GIT_DESCRIBE"))]
 struct Cli {
+    #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
+    log_level: LevelFilter,
+
     #[arg(help = "Number of days to consider a PR stale.")]
     days: i64,
 
@@ -47,8 +50,8 @@ struct Author {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
     let args = Cli::parse();
+    common::log::init(args.log_level, "ls-stale-prs")?;
 
     // Discover repositories from the provided paths
     let discovery = RepoDiscovery::new(args.paths);
@@ -144,7 +147,7 @@ fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]
 
         // Sort authors by max age (descending) for consistent output
         let mut sorted_authors: Vec<_> = author_stats.iter().collect();
-        sorted_authors.sort_by_key(|a| std::cmp::Reverse(a.1 .1));
+        sorted_authors.sort_by_key(|a| std::cmp::Reverse(a.1.1));
 
         for (author, (count, max_age)) in sorted_authors {
             println!("  {}: ({}, {})", author, count, max_age);
@@ -233,12 +236,16 @@ mod tests {
         let repos = discovery.discover().unwrap();
 
         assert_eq!(repos.len(), 2);
-        assert!(repos
-            .iter()
-            .any(|r| r.path.file_name().unwrap() == "repo1" && r.slug == "org1/repo1"));
-        assert!(repos
-            .iter()
-            .any(|r| r.path.file_name().unwrap() == "repo2" && r.slug == "org2/repo2"));
+        assert!(
+            repos
+                .iter()
+                .any(|r| r.path.file_name().unwrap() == "repo1" && r.slug == "org1/repo1")
+        );
+        assert!(
+            repos
+                .iter()
+                .any(|r| r.path.file_name().unwrap() == "repo2" && r.slug == "org2/repo2")
+        );
     }
 
     #[test]

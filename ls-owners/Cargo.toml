@@ -7,6 +7,7 @@ build = "build.rs"
 [dependencies]
 clap = { workspace = true }
 eyre = { workspace = true }
+log = { workspace = true }
 common = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"

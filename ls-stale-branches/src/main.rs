@@ -3,11 +3,10 @@ use clap::Parser;
 use common::parallel::ParallelExecutor;
 use common::repo::RepoDiscovery;
 use eyre::{Context, Result};
-use log::debug;
+use log::{LevelFilter, debug};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::process::Command;
 
 // Built-in version from build.rs via env!("GIT_DESCRIBE")
 
@@ -16,6 +15,9 @@ use std::process::Command;
 #[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 struct Cli {
+    #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
+    log_level: LevelFilter,
+
     #[arg(help = "Number of days to consider a branch stale.")]
     days: i64,
 
@@ -38,8 +40,8 @@ struct AuthorBranches {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
     let args = Cli::parse();
+    common::log::init(args.log_level, "ls-stale-branches")?;
 
     // Discover repositories
     let discovery = RepoDiscovery::new(args.paths);
@@ -78,27 +80,26 @@ fn get_stale_branches_for_repo(
     ref_: &str,
     repo_path: &std::path::Path,
 ) -> Result<Vec<(String, i64, String)>> {
-    // First, fetch and prune branches for this repository
-    Command::new("git")
-        .args(["fetch", "origin", "--prune"])
-        .current_dir(repo_path)
-        .output()
+    // First, fetch and prune branches for this repository (failures are
+    // tolerated, matching prior behavior: only a spawn error propagates).
+    common::git::output(&["fetch", "origin", "--prune"], Some(repo_path), None)
         .wrap_err("Failed to prune local cache of git branches")?;
 
-    let output = Command::new("git")
-        .args([
+    let output = common::git::output(
+        &[
             "for-each-ref",
             "--sort=-committerdate",
             ref_,
             "--format=%(committerdate:short) %(refname:short) %(committername)",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .wrap_err("Failed to execute git command")?;
+        ],
+        Some(repo_path),
+        None,
+    )
+    .wrap_err("Failed to execute git command")?;
 
     let current_time = Utc::now().timestamp();
     debug!("current_time: {}", current_time);
-    let result = String::from_utf8(output.stdout)?;
+    let result = output.stdout;
 
     let branches: Vec<(String, i64, String)> = result
         .lines()
@@ -145,7 +146,7 @@ fn print_hierarchical_summary(repo_data: &[(String, Vec<(String, i64, String)>)]
 
         // Sort authors by max age (descending) for consistent output
         let mut sorted_authors: Vec<_> = author_stats.iter().collect();
-        sorted_authors.sort_by_key(|a| std::cmp::Reverse(a.1 .1));
+        sorted_authors.sort_by_key(|a| std::cmp::Reverse(a.1.1));
 
         for (author, (count, max_age)) in sorted_authors {
             println!("  {}: ({}, {})", author, count, max_age);

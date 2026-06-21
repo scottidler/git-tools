@@ -1,14 +1,11 @@
 [package]
 name = "reposlug"
 version.workspace = true
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 [dependencies]
 clap = { workspace = true }
+common = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
-env_logger = { workspace = true }
-git2 = { workspace = true }
-regex = "1.12.3"
-url = "2.5.8"

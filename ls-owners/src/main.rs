@@ -3,13 +3,14 @@ use colored::Colorize;
 use common::parallel::ParallelExecutor;
 use common::repo::RepoDiscovery;
 use eyre::{Context, Result};
+use log::{LevelFilter, debug};
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::{Command, exit},
+    process::exit,
 };
 
 const TOP_AUTHORS: usize = 5;
@@ -30,6 +31,9 @@ struct Repo {
 #[derive(Parser)]
 #[command(name = "ls-owners", about = "List CODEOWNERS and detect un-owned code paths", version = env!("GIT_DESCRIBE"))]
 struct Cli {
+    #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
+    log_level: LevelFilter,
+
     /// Only show repos with these statuses: owned, unowned, partial
     #[arg(
         short = 'o',
@@ -51,6 +55,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    common::log::init(cli.log_level, "ls-owners")?;
+    debug!(
+        "main: only={:?} detailed={} paths={:?}",
+        cli.only, cli.detailed, cli.paths
+    );
 
     let filter_set = if cli.only.is_empty() {
         None
@@ -180,15 +189,12 @@ fn try_process_repo(
 /// Runs `git shortlog -s -n --all --no-merges` and returns up to `limit` authors,
 /// filtering out any whose full name appears in `exclude`.
 fn get_top_authors(repo: &Path, limit: usize, exclude: &BTreeSet<String>) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(["shortlog", "-s", "-n", "--all", "--no-merges"])
-        .output()
+    let output = common::git::output(&["shortlog", "-s", "-n", "--all", "--no-merges"], Some(repo), None)
         .context("git shortlog failed")?;
     if !output.status.success() {
         return Ok(Vec::new());
     }
-    let text = String::from_utf8(output.stdout)?;
+    let text = output.stdout;
     let mut authors = Vec::new();
 
     for line in text.lines() {
