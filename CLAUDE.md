@@ -6,7 +6,6 @@ A Rust workspace of CLI tools for git repository discovery, analysis, and manage
 
 - **`common/`** - Shared library with git URL parsing, repo discovery, language detection, and parallel execution
 - **`clone/`** - Clone repos from various spec formats (org/repo, SSH, HTTPS)
-- **`filter-ref/`** - Analyze git refs with age/author filtering
 - **`ls-git-repos/`** - Recursively discover local git repos with language filtering
 - **`ls-github-repos/`** - List GitHub org/user repos via API with language filtering
 - **`ls-owners/`** - Detect CODEOWNERS files and identify un-owned code paths

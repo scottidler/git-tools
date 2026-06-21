@@ -3,7 +3,6 @@ members = [
   "common",
   "clone",
   "reposlug",
-  "filter-ref",
   "ls-git-repos",
   "ls-github-repos",
   "ls-owners",
