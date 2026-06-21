@@ -1,9 +1,17 @@
 use super::*;
-use std::fs;
 use std::io::Write;
+use std::sync::Mutex;
+use tempfile::TempDir;
+
+// `find_ssh_key_for_org` reads the `$CLONE_CFG` env var; serialize every test
+// that reads or mutates it so a test setting CLONE_CFG to a temp path can never
+// race a concurrent reader (the `ini!` macro panics on a file deleted
+// mid-read). Env-var mutation isn't safe with parallel tests.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_find_ssh_key_with_no_slash() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let result = find_ssh_key_for_org("invalid-no-slash");
     assert!(
         result.is_ok() || result.is_err(),
@@ -13,6 +21,7 @@ fn test_find_ssh_key_with_no_slash() {
 
 #[test]
 fn test_find_ssh_key_with_valid_repospec() {
+    let _guard = ENV_LOCK.lock().unwrap();
     // This test verifies the function handles valid repospec without panicking.
     // It may return Ok(None) if no config exists, or Err if config exists but
     // doesn't have the required sections - both are acceptable behaviors.
@@ -23,6 +32,7 @@ fn test_find_ssh_key_with_valid_repospec() {
 
 #[test]
 fn test_find_ssh_key_extracts_org_name() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let test_cases = vec![
         ("org/repo", "org"),
         ("my-org/my-repo", "my-org"),
@@ -36,22 +46,50 @@ fn test_find_ssh_key_extracts_org_name() {
 }
 
 #[test]
-fn test_find_ssh_key_with_custom_config() {
-    let temp_dir = std::env::temp_dir().join("clone_test_config");
-    fs::create_dir_all(&temp_dir).unwrap();
-    let config_path = temp_dir.join("test.cfg");
+fn test_resolve_layout_default_is_bare() {
+    assert_eq!(resolve_layout(false, false, None), Layout::Bare);
+}
 
-    let mut file = fs::File::create(&config_path).unwrap();
+#[test]
+fn test_resolve_layout_flat_flag_wins() {
+    assert_eq!(resolve_layout(true, false, None), Layout::Flat);
+    // CLI --flat overrides a `bare` cfg default.
+    assert_eq!(resolve_layout(true, false, Some("bare")), Layout::Flat);
+}
+
+#[test]
+fn test_resolve_layout_versioning_implies_flat() {
+    assert_eq!(resolve_layout(false, true, None), Layout::Flat);
+    assert_eq!(resolve_layout(false, true, Some("bare")), Layout::Flat);
+}
+
+#[test]
+fn test_resolve_layout_cfg_default_layout() {
+    assert_eq!(resolve_layout(false, false, Some("flat")), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, Some("FLAT")), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, Some("bare")), Layout::Bare);
+    assert_eq!(resolve_layout(false, false, Some("nonsense")), Layout::Bare);
+}
+
+#[test]
+fn test_find_ssh_key_with_custom_config() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let prior = std::env::var("CLONE_CFG").ok();
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("test.cfg");
+
+    let mut file = std::fs::File::create(&config_path).unwrap();
     writeln!(file, "[org.testorg]").unwrap();
     writeln!(file, "sshkey = /path/to/key").unwrap();
 
     unsafe { std::env::set_var("CLONE_CFG", config_path.to_str().unwrap()) };
-
     let result = find_ssh_key_for_org("testorg/repo");
 
-    // Clean up
-    fs::remove_dir_all(&temp_dir).ok();
-    unsafe { std::env::remove_var("CLONE_CFG") };
+    match prior {
+        Some(v) => unsafe { std::env::set_var("CLONE_CFG", v) },
+        None => unsafe { std::env::remove_var("CLONE_CFG") },
+    }
 
     assert!(result.is_ok());
     if let Ok(Some(key)) = result {

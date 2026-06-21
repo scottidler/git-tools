@@ -32,6 +32,12 @@ pub struct Cli {
     #[arg(long, help = "path to cached repos to support fast cloning")]
     pub mirrorpath: Option<String>,
 
+    #[arg(
+        long,
+        help = "use the legacy flat single-checkout layout instead of bare + worktrees"
+    )]
+    pub flat: bool,
+
     #[arg(long, help = "turn on versioning; checkout in reponame/commit rather than reponame")]
     pub versioning: bool,
 

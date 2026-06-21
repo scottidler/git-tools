@@ -10,13 +10,24 @@ use log::warn;
 
 use crate::cli::Cli;
 
+/// On-disk repository layout `clone` produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Bare container (`.bare/` + `.git` pointer + nested worktrees). Default.
+    Bare,
+    /// Legacy single checkout (the pre-worktree behavior).
+    Flat,
+}
+
 /// Validated, resolved configuration consumed by [`crate::run`].
 ///
 /// `Cli` is parsing only; `Config` carries the parsed `RepoSpec`, expanded
-/// paths, and the per-org SSH key resolved from `clone.cfg`.
+/// paths, the resolved layout, and the per-org SSH key resolved from
+/// `clone.cfg`.
 #[derive(Debug)]
 pub struct Config {
     pub spec: RepoSpec,
+    pub layout: Layout,
     pub revision: String,
     pub remote: String,
     pub clonepath: PathBuf,
@@ -24,6 +35,9 @@ pub struct Config {
     pub versioning: bool,
     pub verbose: bool,
     pub ssh_key: Option<PathBuf>,
+    /// Last-resort default branch from `clone.cfg` `[clone] default`, used only
+    /// when the remote does not advertise a default branch.
+    pub default_branch: Option<String>,
 }
 
 impl TryFrom<Cli> for Config {
@@ -33,9 +47,12 @@ impl TryFrom<Cli> for Config {
         let spec = git::parse_repospec(&cli.repospec)
             .wrap_err_with(|| format!("Failed to parse repository specification: {}", cli.repospec))?;
         let ssh_key = find_ssh_key_for_org(&spec.org)?.map(PathBuf::from);
+        let layout = resolve_layout(cli.flat, cli.versioning, clone_cfg_value("default-layout").as_deref());
+        let default_branch = clone_cfg_value("default");
 
         Ok(Self {
             spec,
+            layout,
             revision: cli.revision,
             remote: cli.remote,
             clonepath: PathBuf::from(cli.clonepath),
@@ -43,8 +60,33 @@ impl TryFrom<Cli> for Config {
             versioning: cli.versioning,
             verbose: cli.verbose,
             ssh_key,
+            default_branch,
         })
     }
+}
+
+/// Resolve the layout: CLI `--flat` (or `--versioning`, which is incompatible
+/// with bare worktrees) > `clone.cfg` `[clone] default-layout` > `Bare`.
+fn resolve_layout(flat_flag: bool, versioning: bool, cfg_layout: Option<&str>) -> Layout {
+    if flat_flag || versioning {
+        return Layout::Flat;
+    }
+    match cfg_layout {
+        Some(s) if s.eq_ignore_ascii_case("flat") => Layout::Flat,
+        _ => Layout::Bare,
+    }
+}
+
+/// Read a single value from the `[clone]` section of `clone.cfg`, if the file
+/// and key are present. Honors `$CLONE_CFG`, else `~/.config/clone/clone.cfg`.
+fn clone_cfg_value(key: &str) -> Option<String> {
+    let home = env::var("HOME").ok()?;
+    let path = env::var("CLONE_CFG").unwrap_or_else(|_| format!("{}/.config/clone/clone.cfg", home));
+    if !Path::new(&path).exists() {
+        return None;
+    }
+    let cfg = ini!(&path);
+    cfg.get("clone").and_then(|m| m.get(key).cloned().flatten())
 }
 
 /// Resolve the per-org transport SSH key from `clone.cfg`.

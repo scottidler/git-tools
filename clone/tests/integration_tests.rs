@@ -92,12 +92,59 @@ fn test_clone_existing_public_repo_succeeds() {
         stdout
     );
 
-    // Check that the directory was created and has a .git directory
-    let cloned_dir = temp_dir.join("rust-lang/libc");
-    assert!(cloned_dir.exists(), "Cloned directory should exist at {:?}", cloned_dir);
+    // Bare is the default: the container holds .bare + a .git pointer file, and
+    // the printed destination is the default-branch worktree under it.
+    let container = temp_dir.join("rust-lang/libc");
     assert!(
-        cloned_dir.join(".git").exists(),
-        ".git directory should exist in cloned repo"
+        container.join(".bare").is_dir(),
+        ".bare dir should exist at {:?}",
+        container
+    );
+    assert!(container.join(".git").is_file(), ".git pointer file should exist");
+
+    // The binary ran with CWD=temp_dir and clonepath="." so it prints a path
+    // relative to temp_dir (the wrapper `cd`s from the same CWD).
+    let printed = stdout.trim();
+    let rel = printed.strip_prefix("./").unwrap_or(printed);
+    let dest = temp_dir.join(rel);
+    assert!(dest.is_dir(), "printed worktree destination should exist: {:?}", dest);
+    assert!(
+        dest.starts_with(&container),
+        "worktree {:?} should be under the container {:?}",
+        dest,
+        container
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_clone_flat_legacy_layout() {
+    let temp_dir = create_temp_dir("flat");
+    let binary = get_clone_binary();
+
+    let output = Command::new(&binary)
+        .current_dir(&temp_dir)
+        .arg("--flat")
+        .arg("rust-lang/libc")
+        .output()
+        .expect("Failed to execute clone command");
+
+    assert!(
+        output.status.success(),
+        "Flat clone should succeed. Stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // --flat restores the legacy single checkout: a real .git directory, no .bare.
+    let cloned_dir = temp_dir.join("rust-lang/libc");
+    assert!(
+        cloned_dir.join(".git").is_dir(),
+        ".git should be a directory in a flat clone"
+    );
+    assert!(
+        !cloned_dir.join(".bare").exists(),
+        "flat clone should not have a .bare dir"
     );
 
     fs::remove_dir_all(&temp_dir).ok();

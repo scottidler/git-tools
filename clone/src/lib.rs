@@ -1,10 +1,12 @@
 // clone — core logic. The binary (`main.rs`) is a thin shell over `run`.
 
+pub mod bare;
 pub mod cli;
 pub mod config;
+pub mod transport;
 
 pub use cli::Cli;
-pub use config::Config;
+pub use config::{Config, Layout};
 
 use std::path::{Path, PathBuf};
 
@@ -19,18 +21,58 @@ pub const REMOTE_URLS: [&str; 2] = ["ssh://git@github.com", "https://github.com"
 /// destination path the shell wrapper should `cd` into.
 pub fn run(config: Config) -> Result<PathBuf> {
     let repospec = config.spec.to_string();
-    debug!("run: repospec={} clonepath={:?}", repospec, config.clonepath);
+    debug!(
+        "run: repospec={} clonepath={:?} layout={:?}",
+        repospec, config.clonepath, config.layout
+    );
 
-    let full_clone_path = config.clonepath.join(&repospec);
+    let target = config.clonepath.join(&repospec);
 
-    let dest = if full_clone_path.exists() && full_clone_path.read_dir()?.next().is_some() {
-        update_existing_repo(&full_clone_path, &config.revision)?;
-        full_clone_path
+    match config.layout {
+        Layout::Flat => clone_or_update_flat(&config, &repospec, &target),
+        Layout::Bare => run_bare(&config, &repospec, &target),
+    }
+}
+
+/// Bare-layout dispatch, handling the mixed-ecosystem cases the default flip
+/// introduces:
+/// - an existing bare container → idempotent reconcile;
+/// - an existing *flat* checkout (not yet migrated) → update it in place and
+///   hint at `--migrate`, never silently convert;
+/// - otherwise → set up a fresh bare container.
+fn run_bare(config: &Config, repospec: &str, target: &Path) -> Result<PathBuf> {
+    if bare::is_bare_container(target) {
+        return bare::reconcile_container(config, target);
+    }
+
+    if is_flat_clone(target) {
+        let dest = update_existing_repo(target, &config.revision).map(|_| target.to_path_buf())?;
+        eprintln!(
+            "Note: '{}' is a flat checkout. Run `clone --migrate {}` to convert it to the bare-worktree layout.",
+            target.display(),
+            repospec
+        );
+        return Ok(dest);
+    }
+
+    bare::setup_bare_container(config)
+}
+
+/// Flat-layout: update an existing non-empty checkout, else fresh flat clone.
+fn clone_or_update_flat(config: &Config, repospec: &str, target: &Path) -> Result<PathBuf> {
+    if target.exists() && target.read_dir()?.next().is_some() {
+        update_existing_repo(target, &config.revision)?;
+        Ok(target.to_path_buf())
     } else {
-        clone_new_repo(&config, &repospec)?
-    };
+        clone_new_repo(config, repospec)
+    }
+}
 
-    Ok(dest)
+/// Whether `path` is a flat checkout (`.git` dir or file) that is *not* a bare
+/// container.
+fn is_flat_clone(path: &Path) -> bool {
+    let git = path.join(".git");
+    (git.is_dir() || git.is_file()) && !bare::is_bare_container(path)
 }
 
 fn update_existing_repo(repo: &Path, revision: &str) -> Result<()> {
@@ -115,26 +157,16 @@ fn clone_new_repo(config: &Config, repospec: &str) -> Result<PathBuf> {
         config.clonepath.join(repospec)
     };
 
-    let mirror = config.mirrorpath.as_deref();
-
-    // Perform the clone (with SSH fallback)
-    let clone_succeeded = if let Some(key) = config.ssh_key.as_deref() {
-        let key = key.to_string_lossy();
-        attempt_clone_with_ssh(repospec, &full_clone_path, &config.remote, mirror, &key, config.verbose)?
-            || attempt_clone_with_ssh(repospec, &full_clone_path, REMOTE_URLS[1], mirror, &key, config.verbose)?
-    } else {
-        attempt_clone(repospec, &full_clone_path, &config.remote, mirror, config.verbose)?
-            || attempt_clone(repospec, &full_clone_path, REMOTE_URLS[1], mirror, config.verbose)?
-    };
-
-    if !clone_succeeded {
-        return Err(eyre!(
-            "Failed to clone repository '{}' from both '{}' and '{}'",
-            repospec,
-            config.remote,
-            REMOTE_URLS[1]
-        ));
-    }
+    // Perform the clone (SSH key first, HTTPS fallback).
+    transport::clone_with_fallback(
+        repospec,
+        &full_clone_path,
+        &config.remote,
+        config.mirrorpath.as_deref(),
+        config.ssh_key.as_deref(),
+        &[],
+        config.verbose,
+    )?;
 
     // Verify clone actually fetched commits (handles partial clone failures)
     let head_ok = git::output(&["rev-parse", "HEAD"], Some(&full_clone_path), None)
@@ -181,83 +213,6 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
         .map(|s| s.to_string())?;
 
     Ok(sha)
-}
-
-fn attempt_clone_with_ssh(
-    repospec: &str,
-    full_clone_path: &Path,
-    remote_url: &str,
-    mirror_option: Option<&Path>,
-    ssh_key: &str,
-    verbose: bool,
-) -> Result<bool> {
-    let mut args: Vec<String> = vec![
-        "clone".into(),
-        format!("{}/{}", remote_url, repospec),
-        full_clone_path.to_string_lossy().into_owned(),
-    ];
-    if let Some(mirror) = mirror_option {
-        args.push("--reference".into());
-        args.push(format!("{}/{}.git", mirror.display(), repospec));
-    }
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = git::run(
-        &arg_refs,
-        None,
-        Some(&[("GIT_SSH_COMMAND", &git::ssh_command(ssh_key))]),
-    );
-
-    match result {
-        Ok(_) => {
-            if verbose {
-                eprintln!("Successfully cloned from {} using SSH key {}", remote_url, ssh_key);
-            }
-            Ok(true)
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("Failed to clone from {} using SSH: {}", remote_url, e);
-            }
-            Ok(false)
-        }
-    }
-}
-
-fn attempt_clone(
-    repospec: &str,
-    full_clone_path: &Path,
-    remote_url: &str,
-    mirror_option: Option<&Path>,
-    verbose: bool,
-) -> Result<bool> {
-    let mut args: Vec<String> = vec![
-        "clone".into(),
-        format!("{}/{}", remote_url, repospec),
-        full_clone_path.to_string_lossy().into_owned(),
-    ];
-    if let Some(mirror) = mirror_option {
-        args.push("--reference".into());
-        args.push(format!("{}/{}.git", mirror.display(), repospec));
-    }
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = git::run(&arg_refs, None, None);
-
-    match result {
-        Ok(_) => {
-            if verbose {
-                eprintln!("Successfully cloned from {}", remote_url);
-            }
-            Ok(true)
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("Failed to clone from {}: {}", remote_url, e);
-            }
-            Ok(false)
-        }
-    }
 }
 
 #[cfg(test)]
