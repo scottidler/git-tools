@@ -1,12 +1,12 @@
 [package]
 name = "clone"
 version.workspace = true
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 [dependencies]
 clap = { workspace = true }
+common = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
-env_logger = { workspace = true }
 ini = "1.3.0"
