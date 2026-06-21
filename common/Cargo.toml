@@ -8,7 +8,6 @@ eyre = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 regex = "1.12.3"
-git2 = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 rayon = "1.12.0"
