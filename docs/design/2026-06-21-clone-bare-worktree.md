@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-06-21
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 **Depends on:** `2026-06-21-common-shared-infra.md` (the shared parser, git
 runner, and `RepoDiscovery` this design extends with bare-container awareness)

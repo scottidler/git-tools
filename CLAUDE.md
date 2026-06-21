@@ -78,6 +78,52 @@ linked, edit `manifest.yml` and run `manifest`; do not hand-edit the symlinks.
 - **Tagging**: only via `/shipit`/`bump`, only on `main`, annotated, single flat `v*` tag for the
   whole workspace — never per-crate tags.
 
+## Bare-Worktree Layout (clone's default)
+
+`clone org/repo` produces a **bare container + nested worktrees**, not a flat
+checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
+
+```
+~/repos/<org>/<repo>/        # the container (the "logical repo")
+  .bare/                     # git clone --bare -> database only, no working files
+  .git                       # a FILE, one line: "gitdir: ./.bare" (relative, survives rename)
+  <default-branch>/          # the worktree cd lands in (always present)
+```
+
+- **Repo-path contract.** `~/repos/<org>/<repo>` is the logical repo (one row in
+  discovery); `<repo>/<default-branch>` is the canonical working tree you `cd`
+  into. The default-branch worktree is a guaranteed invariant - always present.
+- **`.git` pointer is relative** (`gitdir: ./.bare`) so a container can be moved
+  with `mv`; per-worktree links are absolute and need `git worktree repair`.
+- **Mandatory refspec fix (gotcha).** `git clone --bare` leaves
+  `remote.origin.fetch` empty, so remote-tracking branches never populate.
+  `clone` sets `+refs/heads/*:refs/remotes/origin/*` and fetches; never skip it.
+- **Persona invariant (security).** Worktrees stay under `~/repos/<org>/`, so the
+  `~/.gitconfig` `includeIf "gitdir:~/repos/tatari-tv/"` still fires and commits
+  carry the work identity. A worktree placed outside the org prefix silently
+  reverts to the home identity - never do it. Locked by a unit test
+  (`clone/src/bare/tests.rs::test_persona_invariant_under_org_prefix`).
+- **Commands:**
+  - `clone org/repo` - bare container + default worktree, `cd` into it.
+  - `clone --flat org/repo` - legacy single checkout (`--versioning` implies it).
+  - `clone --worktree <branch> [org/repo]` - add a worktree (raw arg matches an
+    existing local/remote branch first; only a new branch is slugified), `cd` in.
+  - `clone --migrate org/repo` - convert a flat checkout to bare; refuses a dirty
+    or stashed tree, preserves unpushed commits + local-only branches via a
+    bare-clone-from-local, swaps recoverably, repairs worktree links.
+- **Existing flat clones** are untouched until `--migrate`d; `clone org/repo` on
+  one updates it in place and prints a `--migrate` hint (mixed ecosystem is
+  supported). Discovery (`common::RepoDiscovery`) recognizes both shapes.
+- **`clone.cfg` `[clone] default-layout = bare|flat`** sets the per-machine
+  default (CLI `--flat` overrides it; built-in default is `bare`).
+- **Navigation shim** (`shell-functions.sh`): a zsh `chpwd` hook redirects `cd`/
+  `z`/pushd into a bare container's default-branch worktree, so any way of
+  arriving at the container lands you "in the repo." The `clone` wrapper still
+  only consumes the binary's stdout (the destination path) - unchanged.
+
+Module map: `clone/src/{cli,config,transport,bare,worktree,migrate}.rs` over a
+thin `main.rs` + testable `lib.rs`.
+
 ## Key Conventions
 
 - **Error handling**: `eyre::Result<T>` everywhere
