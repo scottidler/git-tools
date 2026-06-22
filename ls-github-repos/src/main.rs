@@ -92,13 +92,30 @@ fn resolve_token(name: &str, token_path: &str) -> Result<String> {
         }
     }
 
-    // Fall back to file-based token
+    // Fall back to file-based token: <token_path>/<name>.
     let expanded_token_path = shellexpand::tilde(token_path).to_string();
     let token_file_path = PathBuf::from(expanded_token_path).join(name);
-    let token = fs::read_to_string(&token_file_path)
-        .map_err(|e| eyre!("Failed to read token file '{}': {}", token_file_path.display(), e))?
-        .trim()
-        .to_string();
+    let token = match fs::read_to_string(&token_file_path) {
+        Ok(t) => t,
+        // A missing file is the common "no token configured for this name" case
+        // (e.g. a typo'd org/user) - say so plainly and point at both mechanisms,
+        // rather than surfacing a raw "Failed to read token file" IO error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(eyre!(
+                "no GitHub token configured for '{name}': add a '{name}: <ENV_VAR>' entry to {CONFIG_PATH}, \
+                 or drop the token at '{}'",
+                token_file_path.display()
+            ));
+        }
+        Err(e) => {
+            return Err(eyre!(
+                "failed to read token file '{}': {}",
+                token_file_path.display(),
+                e
+            ));
+        }
+    };
+    let token = token.trim().to_string();
     debug!("Resolved token for '{}' from file", name);
     Ok(token)
 }

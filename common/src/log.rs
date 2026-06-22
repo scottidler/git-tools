@@ -1,13 +1,16 @@
 use eyre::Result;
 use log::LevelFilter;
 
-/// Initialize logging to **stderr** at the given `--log-level` level.
+/// Initialize logging to **stderr** at the given `--log-level` level, and
+/// install the quiet eyre error renderer ([`crate::error::install`]) so a
+/// `bail!` reaches the user as a clean message instead of a `Location:` dump.
 ///
 /// Deliberately does NOT consult `RUST_LOG` (project rule: `--log-level` is the
 /// only knob). Targets stderr, matching the previous `env_logger::init()`
 /// behavior for these short-lived list CLIs. Idempotent: uses `try_init`, so it
 /// is safe to call from tests without a double-init panic.
 pub fn init(level: LevelFilter, project: &str) -> Result<()> {
+    crate::error::install();
     let _ = env_logger::Builder::new()
         .filter_level(level)
         .target(env_logger::Target::Stderr)
