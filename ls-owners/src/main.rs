@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use colored::Colorize;
 use common::parallel::ParallelExecutor;
 use common::repo::RepoDiscovery;
@@ -39,7 +39,7 @@ struct Cli {
         short = 'o',
         long = "only",
         value_name = "FILTER",
-        num_args = 1..,
+        action = ArgAction::Append,
         value_parser = ["owned", "unowned", "partial"]
     )]
     only: Vec<String>,
@@ -443,6 +443,21 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_only_does_not_swallow_trailing_path() {
+        // `--only` is a repeatable single-value flag (ArgAction::Append), so a
+        // trailing path is NOT consumed as another filter value.
+        let cli = Cli::try_parse_from(["ls-owners", "--only", "unowned", "/some/path"]).unwrap();
+        assert_eq!(cli.only, vec!["unowned"]);
+        assert_eq!(cli.paths, vec!["/some/path"]);
+    }
+
+    #[test]
+    fn test_only_is_repeatable() {
+        let cli = Cli::try_parse_from(["ls-owners", "--only", "owned", "--only", "unowned"]).unwrap();
+        assert_eq!(cli.only, vec!["owned", "unowned"]);
+    }
 
     fn create_test_repo_with_codeowners(
         temp_dir: &TempDir,
