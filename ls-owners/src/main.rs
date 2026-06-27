@@ -1,14 +1,19 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use clap::{ArgAction, Parser};
 use colored::Colorize;
 use common::parallel::ParallelExecutor;
 use common::repo::RepoDiscovery;
-use eyre::{Context, Result};
-use log::{LevelFilter, debug};
+use eyre::{Context, Result, bail, eyre};
+use log::{LevelFilter, debug, warn};
 use regex::Regex;
+use reqwest::blocking::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::exit,
 };
@@ -48,6 +53,11 @@ struct Cli {
     #[arg(short = 'd', long = "detailed")]
     detailed: bool,
 
+    /// Scan repos REMOTELY via the GitHub API for the given org(s) instead of
+    /// local paths. Requires GITHUB_TOKEN or GH_TOKEN. Space-separated or repeated.
+    #[arg(long = "org", value_name = "ORG", num_args = 1.., action = ArgAction::Append)]
+    orgs: Vec<String>,
+
     /// One or more paths to Git repos (defaults to current directory)
     #[arg(value_name = "PATH", default_values = &["."], num_args = 0..)]
     paths: Vec<String>,
@@ -57,29 +67,34 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     common::log::init(cli.log_level, "ls-owners")?;
     debug!(
-        "main: only={:?} detailed={} paths={:?}",
-        cli.only, cli.detailed, cli.paths
+        "main: only={:?} detailed={} orgs={:?} paths={:?}",
+        cli.only, cli.detailed, cli.orgs, cli.paths
     );
 
-    let filter_set = if cli.only.is_empty() {
+    let filter_set: Option<BTreeSet<String>> = if cli.only.is_empty() {
         None
     } else {
         Some(cli.only.iter().map(|s| s.to_lowercase()).collect())
     };
 
-    let discovery = RepoDiscovery::new(cli.paths);
-    let repos = discovery.discover().context("failed to scan for repositories")?;
-
-    let executor = ParallelExecutor::new(repos);
-    let results: Vec<Repo> = executor.execute(|repo_info| match try_process_repo(repo_info, &filter_set) {
-        Ok(Some((slug, status, mapping))) => Ok(Some(Repo {
-            slug,
-            status,
-            value: Value::Mapping(mapping),
-        })),
-        Ok(None) => Ok(None),
-        Err(err) => Err(err),
-    });
+    // --org selects REMOTE mode (scan via the GitHub API); otherwise scan the
+    // local paths. They are mutually exclusive - --org wins when present.
+    let results: Vec<Repo> = if cli.orgs.is_empty() {
+        let discovery = RepoDiscovery::new(cli.paths);
+        let repos = discovery.discover().context("failed to scan for repositories")?;
+        let executor = ParallelExecutor::new(repos);
+        executor.execute(|repo_info| match try_process_repo(repo_info, &filter_set) {
+            Ok(Some((slug, status, mapping))) => Ok(Some(Repo {
+                slug,
+                status,
+                value: Value::Mapping(mapping),
+            })),
+            Ok(None) => Ok(None),
+            Err(err) => Err(err),
+        })
+    } else {
+        scan_remote(&cli.orgs, &filter_set)?
+    };
 
     let sorted = sorted_entries(&results);
 
@@ -223,6 +238,13 @@ fn load_ownership(root: &Path) -> Result<Ownership> {
 
     let content =
         fs::read_to_string(&codeowners).wrap_err_with(|| format!("Failed to read {}", codeowners.display()))?;
+    Ok(parse_codeowners(&content))
+}
+
+/// Parse CODEOWNERS text into [`Ownership`]. Shared by the local-file path
+/// ([`load_ownership`]) and the remote GitHub-API path ([`fetch_remote_codeowners`])
+/// so both classify identically.
+fn parse_codeowners(content: &str) -> Ownership {
     let re_comment = Regex::new(r"^\s*#").unwrap();
     let mut entries = BTreeMap::<String, Vec<String>>::new();
 
@@ -243,11 +265,7 @@ fn load_ownership(root: &Path) -> Result<Ownership> {
         entries.insert(pat, owners);
     }
 
-    if entries.is_empty() {
-        Ok(Ownership::Empty)
-    } else {
-        Ok(Ownership::Present(entries))
-    }
+    if entries.is_empty() { Ownership::Empty } else { Ownership::Present(entries) }
 }
 
 /// Recursively finds all “code” files under `root`, skipping `.git` and `.github`.
@@ -437,12 +455,180 @@ fn is_code_file(path: &Path) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Remote mode: scan CODEOWNERS via the GitHub API (no local clone required).
+// Remote mode cannot detect unowned PATHS (there is no local file tree to walk),
+// so it reports owned vs missing/empty CODEOWNERS only.
+// ---------------------------------------------------------------------------
+
+/// Scan CODEOWNERS for every repo in each org via the GitHub API, returning the
+/// same `Repo` rows as local mode (optionally filtered by `--only`).
+fn scan_remote(orgs: &[String], filter_set: &Option<BTreeSet<String>>) -> Result<Vec<Repo>> {
+    debug!("scan_remote: orgs={:?}", orgs);
+    let token = github_token()?;
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static("ls-owners"));
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("token {}", token))?);
+    let client = Client::builder()
+        .default_headers(headers)
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let mut results = Vec::new();
+    for org in orgs {
+        let slugs = list_org_repos(org, &client).wrap_err_with(|| format!("listing repos for org '{}'", org))?;
+        debug!("scan_remote: org={} repo_count={}", org, slugs.len());
+        let exclude = match read_ex_employees(org) {
+            Ok(set) => set,
+            Err(err) => {
+                warn!("scan_remote: could not read ex-employees for {}: {}", org, err);
+                BTreeSet::new()
+            }
+        };
+        for slug in slugs {
+            match fetch_remote_codeowners(&slug, &client) {
+                Ok(ownership) => results.push(build_remote_repo(&slug, ownership, &exclude)),
+                Err(err) => warn!("scan_remote: skipping {}: {}", slug, err),
+            }
+        }
+    }
+
+    if let Some(filter) = filter_set {
+        results.retain(|r| filter.contains(&r.status));
+    }
+    debug!("scan_remote: produced {} repo row(s)", results.len());
+    Ok(results)
+}
+
+/// The GitHub token from `GITHUB_TOKEN` or `GH_TOKEN`.
+fn github_token() -> Result<String> {
+    debug!("github_token");
+    env::var("GITHUB_TOKEN")
+        .or_else(|_| env::var("GH_TOKEN"))
+        .map_err(|_| eyre!("GitHub token missing; set GITHUB_TOKEN or GH_TOKEN"))
+}
+
+/// List every repo slug (`org/name`) in `org`, following pagination.
+fn list_org_repos(org: &str, client: &Client) -> Result<Vec<String>> {
+    debug!("list_org_repos: org={}", org);
+    let mut page = 1;
+    let mut all = Vec::new();
+    loop {
+        let url = format!("https://api.github.com/orgs/{}/repos?per_page=100&page={}", org, page);
+        let repos: Vec<JsonValue> = client.get(&url).send()?.error_for_status()?.json()?;
+        if repos.is_empty() {
+            break;
+        }
+        let count = repos.len();
+        for repo in &repos {
+            if let Some(full) = repo.get("full_name").and_then(JsonValue::as_str) {
+                all.push(full.to_string());
+            }
+        }
+        if count < 100 {
+            break;
+        }
+        page += 1;
+    }
+    debug!("list_org_repos: org={} found={}", org, all.len());
+    Ok(all)
+}
+
+/// Fetch and classify `.github/CODEOWNERS` for `slug` via the contents API.
+fn fetch_remote_codeowners(slug: &str, client: &Client) -> Result<Ownership> {
+    debug!("fetch_remote_codeowners: slug={}", slug);
+    let url = format!("https://api.github.com/repos/{}/contents/.github/CODEOWNERS", slug);
+    let resp = client.get(&url).send()?;
+    match resp.status() {
+        reqwest::StatusCode::NOT_FOUND => Ok(Ownership::Missing),
+        reqwest::StatusCode::OK => {
+            let json: JsonValue = resp.json()?;
+            let content_b64 = json
+                .get("content")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| eyre!("no content field in GitHub response for {}", slug))?;
+            let decoded = STANDARD.decode(content_b64.replace('\n', ""))?;
+            let text = String::from_utf8(decoded).wrap_err_with(|| format!("CODEOWNERS for {} is not UTF-8", slug))?;
+            Ok(parse_codeowners(&text))
+        }
+        other => bail!("GitHub returned {} for {}", other, slug),
+    }
+}
+
+/// Build a `Repo` row from remotely-fetched ownership, excluding ex-employees.
+/// No unowned-path detection (no local tree), so an empty unowned set is used.
+fn build_remote_repo(slug: &str, ownership: Ownership, exclude: &BTreeSet<String>) -> Repo {
+    let (status, mapping) = match ownership {
+        Ownership::Missing => {
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::String("MISSING_CODEOWNERS".into()),
+            );
+            ("unowned".to_string(), m)
+        }
+        Ownership::Empty => {
+            let mut m = Mapping::new();
+            m.insert(Value::String("paths".into()), Value::String("EMPTY_CODEOWNERS".into()));
+            ("unowned".to_string(), m)
+        }
+        Ownership::Present(mut entries) => {
+            for owners in entries.values_mut() {
+                owners.retain(|o| !exclude.contains(o));
+            }
+            let mut m = Mapping::new();
+            m.insert(
+                Value::String("paths".into()),
+                Value::Mapping(build_repo_mapping(entries, BTreeSet::new())),
+            );
+            ("owned".to_string(), m)
+        }
+    };
+    Repo {
+        slug: slug.to_string(),
+        status,
+        value: Value::Mapping(mapping),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_codeowners_shared() {
+        assert!(matches!(parse_codeowners(""), Ownership::Empty));
+        assert!(matches!(parse_codeowners("# only a comment\n"), Ownership::Empty));
+        match parse_codeowners("* @alice @bob\n/docs/ @docs\n") {
+            Ownership::Present(e) => {
+                assert_eq!(e.get("/").unwrap(), &vec!["alice".to_string(), "bob".to_string()]);
+                assert_eq!(e.get("/docs/").unwrap(), &vec!["docs".to_string()]);
+            }
+            _ => panic!("expected Present"),
+        }
+    }
+
+    #[test]
+    fn test_build_remote_repo_statuses_and_ex_employee_filter() {
+        let empty_ex = BTreeSet::new();
+        assert_eq!(
+            build_remote_repo("o/r", Ownership::Missing, &empty_ex).status,
+            "unowned"
+        );
+        assert_eq!(build_remote_repo("o/r", Ownership::Empty, &empty_ex).status, "unowned");
+
+        let mut entries = BTreeMap::new();
+        entries.insert("/".to_string(), vec!["alice".to_string(), "exguy".to_string()]);
+        let exclude: BTreeSet<String> = ["exguy".to_string()].into_iter().collect();
+        let repo = build_remote_repo("o/r", Ownership::Present(entries), &exclude);
+        assert_eq!(repo.status, "owned");
+        let yaml = serde_yaml::to_string(&repo.value).unwrap();
+        assert!(!yaml.contains("exguy"), "ex-employee must be filtered out: {yaml}");
+        assert!(yaml.contains("alice"), "remaining owner must be present: {yaml}");
+    }
 
     #[test]
     fn test_only_does_not_swallow_trailing_path() {
