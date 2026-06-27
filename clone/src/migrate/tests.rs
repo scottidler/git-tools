@@ -1,6 +1,11 @@
 use super::*;
 use std::fs;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+/// `current_dir` is process-global, like env vars - serialize every test that
+/// changes it so parallel runs cannot race (per the Rust conventions).
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 fn git_run(dir: &Path, args: &[&str]) {
     let out = git::output(args, Some(dir), None).unwrap();
@@ -175,6 +180,86 @@ fn test_migrate_from_non_default_branch_creates_default_worktree() {
         "feature's unpushed commit must survive; got: {:?}",
         log.stdout
     );
+}
+
+#[test]
+fn test_flat_from_cwd_resolves_main_worktree() {
+    let _guard = CWD_LOCK.lock().unwrap();
+    let prior = std::env::current_dir().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+    let main = flat.canonicalize().unwrap();
+
+    // A linked worktree and a nested subdirectory.
+    let linked = root.join("linked");
+    git_run(&flat, &["worktree", "add", "-b", "feature", linked.to_str().unwrap()]);
+    let sub = flat.join("a").join("b");
+    fs::create_dir_all(&sub).unwrap();
+
+    std::env::set_current_dir(&sub).unwrap();
+    assert_eq!(
+        flat_from_cwd().unwrap().canonicalize().unwrap(),
+        main,
+        "from a subdirectory, resolves the main worktree"
+    );
+
+    std::env::set_current_dir(&linked).unwrap();
+    assert_eq!(
+        flat_from_cwd().unwrap().canonicalize().unwrap(),
+        main,
+        "from a linked worktree, resolves the main worktree"
+    );
+
+    std::env::set_current_dir(prior).unwrap();
+}
+
+#[test]
+fn test_flat_from_cwd_rejects_bare_container() {
+    let _guard = CWD_LOCK.lock().unwrap();
+    let prior = std::env::current_dir().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+
+    std::env::set_current_dir(&worktree).unwrap();
+    let err = flat_from_cwd().unwrap_err();
+    std::env::set_current_dir(prior).unwrap();
+    assert!(
+        format!("{err}").contains("already a bare container"),
+        "should reject an already-migrated layout; got: {err}"
+    );
+}
+
+/// Rough-edge #1 regression: migrating via a RELATIVE path with two worktrees
+/// (default + a non-default checked-out branch) used to fail `git worktree
+/// repair` because the relative path was re-resolved against the wrong cwd. The
+/// canonicalize at the top of `migrate_flat_to_bare` fixes it.
+#[test]
+fn test_migrate_relative_path_with_two_worktrees() {
+    let _guard = CWD_LOCK.lock().unwrap();
+    let prior = std::env::current_dir().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote); // <root>/work/org/repo
+    git_run(&flat, &["checkout", "-b", "feature"]);
+
+    std::env::set_current_dir(root.join("work")).unwrap();
+    let result = migrate_flat_to_bare(Path::new("org/repo"), Some("main"));
+    std::env::set_current_dir(prior).unwrap();
+
+    let worktree = result.expect("relative-path migrate with two worktrees should succeed");
+    assert!(worktree.ends_with("main"));
+    assert!(worktree.join("README.md").is_file());
+    let container = worktree.parent().unwrap();
+    let feature = container.join("feature");
+    assert!(feature.is_dir(), "the non-default worktree must be present");
+    let out = git::output(&["status", "--porcelain"], Some(&feature), None).unwrap();
+    assert!(out.status.success(), "feature worktree must be functional after repair");
 }
 
 #[test]

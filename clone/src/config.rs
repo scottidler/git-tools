@@ -27,7 +27,9 @@ pub enum Op {
     /// Add a worktree for the given (raw) branch argument to an existing bare
     /// container. `spec` is optional (derived from CWD when absent).
     AddWorktree(String),
-    /// Convert an existing flat checkout into a bare container. Requires `spec`.
+    /// Convert an existing flat checkout into a bare container. `spec` is
+    /// optional (derived from the current directory's enclosing repo when
+    /// absent).
     Migrate,
 }
 
@@ -75,9 +77,10 @@ impl TryFrom<Cli> for Config {
             (None, false) => Op::Clone,
         };
 
-        // Validation: clone and migrate need a repospec; --worktree can derive
-        // its container from CWD, so a repospec is optional there.
-        if matches!(op, Op::Clone | Op::Migrate) && spec.is_none() {
+        // Validation: only clone needs a repospec; --worktree and --migrate can
+        // derive their target from the current directory, so a repospec is
+        // optional for both.
+        if matches!(op, Op::Clone) && spec.is_none() {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
 

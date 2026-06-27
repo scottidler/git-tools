@@ -32,11 +32,13 @@ pub fn run(config: Config) -> Result<PathBuf> {
         }
         Op::AddWorktree(branch) => worktree::add(&config, branch),
         Op::Migrate => {
-            let spec = config
-                .spec
-                .clone()
-                .expect("Op::Migrate requires a spec (enforced in Config::try_from)");
-            let flat = config.clonepath.join(spec.to_string());
+            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no
+            // spec, migrate the flat checkout the user is standing in (derived
+            // from the enclosing repo's main worktree).
+            let flat = match &config.spec {
+                Some(spec) => config.clonepath.join(spec.to_string()),
+                None => migrate::flat_from_cwd()?,
+            };
             migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
         }
     }

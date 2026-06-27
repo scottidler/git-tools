@@ -17,6 +17,34 @@ use log::{debug, warn};
 
 use crate::bare;
 
+/// Resolve the flat checkout to migrate from the current directory: the MAIN
+/// worktree of the enclosing repo, so it works from a subdirectory or even a
+/// legacy linked worktree. Rejects an already-migrated bare container.
+pub fn flat_from_cwd() -> Result<PathBuf> {
+    debug!("flat_from_cwd");
+    let cwd = std::env::current_dir().wrap_err("determining current directory")?;
+    let out = git::output(&["worktree", "list", "--porcelain"], Some(&cwd), None)?;
+    if !out.status.success() {
+        bail!(
+            "not inside a git checkout - run --migrate from within the flat checkout you want to convert, or pass org/repo"
+        );
+    }
+    // A bare repo (clone's already-migrated layout) emits a `bare` line.
+    if out.stdout.lines().any(|l| l.trim() == "bare") {
+        bail!("the enclosing repo is already a bare container; nothing to migrate");
+    }
+    // The first `worktree <path>` line is the main worktree - true from a
+    // subdirectory or a linked worktree alike (verified against git porcelain).
+    let main = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("worktree "))
+        .map(|p| PathBuf::from(p.trim()))
+        .ok_or_else(|| eyre!("could not resolve the main worktree from {}", cwd.display()))?;
+    debug!("flat_from_cwd: main worktree={:?}", main);
+    Ok(main)
+}
+
 /// Convert the flat checkout at `flat` into a bare container in place,
 /// returning the canonical default-branch worktree path. `default_fallback` is
 /// the `clone.cfg` `[clone] default` used only if the remote advertises no
@@ -30,6 +58,13 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     if bare::is_bare_container(flat) {
         bail!("'{}' is already a bare container", flat.display());
     }
+    // Absolutize once so the post-swap `git worktree repair` can never disagree
+    // with the cwd it runs in (the relative-clonepath repair bug). Every path
+    // derived below inherits this absolute base.
+    let flat = flat
+        .canonicalize()
+        .wrap_err_with(|| format!("resolving absolute path of {}", flat.display()))?;
+    let flat = flat.as_path();
 
     // 1. Refuse a dirty or stashed tree; never auto-resolve, never lose work.
     ensure_clean(flat)?;

@@ -45,7 +45,7 @@ pub struct Cli {
 
     #[arg(
         long,
-        help = "convert an existing flat checkout into a bare container (requires a clean tree)"
+        help = "convert a flat checkout into a bare container; with no repospec, migrates the checkout you're standing in"
     )]
     pub migrate: bool,
 
