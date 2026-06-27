@@ -39,7 +39,11 @@ pub fn run(config: Config) -> Result<PathBuf> {
                 Some(spec) => config.clonepath.join(spec.to_string()),
                 None => migrate::flat_from_cwd()?,
             };
-            migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
+            if config.dry_run {
+                migrate::dry_run(&flat, config.default_branch.as_deref())
+            } else {
+                migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
+            }
         }
     }
 }

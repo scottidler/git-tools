@@ -237,6 +237,158 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     Ok(final_worktree)
 }
 
+/// Preview a migration without changing anything: run the read-only preflight,
+/// then print the plan (worktrees, rescues, carry-overs, removals, notes) to
+/// STDERR. Returns the flat path so the wrapper leaves the user at the repo.
+pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
+    debug!("dry_run: flat={:?}", flat);
+    if !flat.is_dir() || !flat.join(".git").exists() {
+        bail!("'{}' is not a git checkout to migrate", flat.display());
+    }
+    if bare::is_bare_container(flat) {
+        bail!("'{}' is already a bare container", flat.display());
+    }
+    let flat = flat
+        .canonicalize()
+        .wrap_err_with(|| format!("resolving absolute path of {}", flat.display()))?;
+    let flat = flat.as_path();
+
+    let origin = origin_url(flat)?;
+    let ssh_owned = ssh_env_for_origin(&origin);
+    let ssh_borrow: Option<Vec<(&str, &str)>> = ssh_owned
+        .as_ref()
+        .map(|v| v.iter().map(|(k, val)| (k.as_str(), val.as_str())).collect());
+    let ssh = ssh_borrow.as_deref();
+
+    let reachable = check_connectivity(flat, ssh).is_ok();
+    let rkvr_ok = require_rkvr().is_ok();
+    let worktrees = list_worktrees(flat)?;
+    let current = current_branch(flat);
+    let default = remote_default_branch(flat, default_fallback, ssh);
+
+    eprintln!(
+        "DRY RUN: migrate '{}' -> bare-worktree layout (no changes made)",
+        flat.display()
+    );
+    eprintln!(
+        "  origin: {}{}",
+        origin,
+        if reachable { "" } else { "   [UNREACHABLE - real run would abort]" }
+    );
+    if !rkvr_ok {
+        eprintln!("  WARNING: rkvr not found - the real run would abort in preflight");
+    }
+    match &default {
+        Some(d) => eprintln!("  default branch (remote): {}", d),
+        None => eprintln!("  default branch: UNKNOWN - real run would abort"),
+    }
+
+    let mut blocked = false;
+    for wt in &worktrees {
+        if has_unmerged(&wt.path)? {
+            eprintln!(
+                "  WOULD ABORT: {} has unmerged paths (resolve/abort the merge first)",
+                wt.path.display()
+            );
+            blocked = true;
+        }
+    }
+
+    eprintln!("  worktrees:");
+    for (i, wt) in worktrees.iter().enumerate() {
+        let kind = if i == 0 { "main  " } else { "linked" };
+        match &wt.branch {
+            None => eprintln!(
+                "    {} {} [detached] -> rescued to wip/detached-*",
+                kind,
+                wt.path.display()
+            ),
+            Some(b) => {
+                let action = if i == 0 {
+                    "container worktree".to_string()
+                } else if default.as_deref() == Some(b) || current.as_deref() == Some(b) {
+                    "already materialized (external dir removed, not duplicated)".to_string()
+                } else {
+                    format!("carried as worktree '{}'", git::slugify_branch(b))
+                };
+                eprintln!("    {} {} [{}] -> {}", kind, wt.path.display(), b, action);
+            }
+        }
+    }
+
+    let mut dirty = Vec::new();
+    for wt in &worktrees {
+        if is_dirty(&wt.path)? {
+            dirty.push(wt.path.display().to_string());
+        }
+    }
+    if !dirty.is_empty() {
+        eprintln!("  would rescue dirty trees to wip/* branches: {}", dirty.join(", "));
+    }
+    let stashes = git::output(&["stash", "list"], Some(flat), None)?
+        .stdout
+        .lines()
+        .count();
+    if stashes > 0 {
+        eprintln!(
+            "  would rescue {} stash entr{} to wip/* branches",
+            stashes,
+            if stashes == 1 { "y" } else { "ies" }
+        );
+    }
+    if worktrees.len() > 1 {
+        let orphans: Vec<String> = worktrees.iter().skip(1).map(|w| w.path.display().to_string()).collect();
+        eprintln!(
+            "  would remove orphaned external worktree dirs (recover with `rkvr rcvr`): {}",
+            orphans.join(", ")
+        );
+    }
+    let ignored = ignored_files(flat);
+    if !ignored.is_empty() {
+        eprintln!(
+            "  git-ignored files NOT carried over (recover from backup): {}",
+            ignored.join(", ")
+        );
+    }
+    if let Some(t) = target_symlink(flat) {
+        eprintln!(
+            "  `target` symlink (-> {}) not recreated; run `relocate-targets` after",
+            t.display()
+        );
+    }
+
+    if blocked {
+        eprintln!("  => migration WOULD ABORT (see above); resolve, then re-run");
+    } else {
+        eprintln!("  => run again without --dry-run to perform the migration");
+    }
+    Ok(flat.to_path_buf())
+}
+
+/// Whether `path`'s working tree has uncommitted/untracked changes.
+fn is_dirty(path: &Path) -> Result<bool> {
+    let out = git::output(&["status", "--porcelain"], Some(path), None)?;
+    Ok(!out.stdout.trim().is_empty())
+}
+
+/// Whether `path` has unmerged paths (mid-merge/rebase).
+fn has_unmerged(path: &Path) -> Result<bool> {
+    let out = git::output(&["diff", "--name-only", "--diff-filter=U"], Some(path), None)?;
+    Ok(!out.stdout.trim().is_empty())
+}
+
+/// The remote's default branch, read-only via `ls-remote --symref` (no mutation),
+/// falling back to the `clone.cfg` default. Used by the dry-run preview.
+fn remote_default_branch(flat: &Path, fallback: Option<&str>, ssh: Option<&[(&str, &str)]>) -> Option<String> {
+    let out = git::output(&["ls-remote", "--symref", "origin", "HEAD"], Some(flat), ssh).ok()?;
+    out.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ref: "))
+        .and_then(|r| r.split_whitespace().next())
+        .map(|r| r.trim_start_matches("refs/heads/").to_string())
+        .or_else(|| fallback.map(String::from))
+}
+
 /// Refuse to run without `rkvr`: migrate's removals must be recoverable, never a
 /// raw non-recoverable delete (the project's hard safety rule).
 fn require_rkvr() -> Result<()> {
@@ -333,8 +485,7 @@ fn rescue_work(flat: &Path, worktrees: &[Worktree]) -> Result<Vec<String>> {
     // 0. Bail BEFORE any mutation if a tree is mid-merge / has unmerged paths -
     //    `git stash` would be fatal and leave a half-rescued repo.
     for wt in worktrees {
-        let unmerged = git::output(&["diff", "--name-only", "--diff-filter=U"], Some(&wt.path), None)?;
-        if !unmerged.stdout.trim().is_empty() {
+        if has_unmerged(&wt.path)? {
             bail!(
                 "refusing to migrate: worktree {} has unmerged paths (mid-merge/rebase). \
                  Resolve or abort it, then re-run --migrate. Nothing has been changed.",
@@ -364,8 +515,7 @@ fn rescue_work(flat: &Path, worktrees: &[Worktree]) -> Result<Vec<String>> {
 
     // 2. Stash each dirty worktree (tracked + untracked) onto the shared stack.
     for wt in worktrees {
-        let status = git::output(&["status", "--porcelain"], Some(&wt.path), None)?;
-        if status.stdout.trim().is_empty() {
+        if !is_dirty(&wt.path)? {
             continue;
         }
         let label = wt.branch.as_deref().unwrap_or("detached");

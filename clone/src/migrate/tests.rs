@@ -482,6 +482,36 @@ fn test_migrate_detects_ignored_files() {
 }
 
 #[test]
+fn test_dry_run_makes_no_changes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // A dirty tree + a linked worktree, to exercise the plan paths.
+    fs::write(flat.join("README.md"), "dirty").unwrap();
+    let linked = root.join("repo-side");
+    git_run(&flat, &["worktree", "add", "-b", "side", linked.to_str().unwrap()]);
+
+    let result = dry_run(&flat, Some("main")).unwrap();
+
+    // Returns the canonical flat path and changed NOTHING.
+    assert_eq!(result, flat.canonicalize().unwrap());
+    assert!(!bare::is_bare_container(&flat), "dry-run must not migrate");
+    assert!(flat.join(".git").is_dir(), "still a flat checkout");
+    assert_eq!(
+        fs::read_to_string(flat.join("README.md")).unwrap(),
+        "dirty",
+        "dirty change untouched"
+    );
+    assert!(linked.exists(), "linked worktree dir must remain");
+    let wip = git::output(&["branch", "--list", "wip/*"], Some(&flat), None).unwrap();
+    assert!(wip.stdout.trim().is_empty(), "dry-run must not create wip/* branches");
+    assert!(!root.join("work").join("org").join("repo.migrating").exists());
+    assert!(!root.join("work").join("org").join("repo.backup").exists());
+}
+
+#[test]
 fn test_target_symlink_detected() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

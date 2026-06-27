@@ -378,12 +378,14 @@ surfaces *before* the rescue mutates anything.
 | Mid-series red `test_migrate_refuses_*` | High | Low | Documented; converted in Phase 4 |
 
 ## Open Questions
-- [ ] Optional preflight **warning** when the repo is already outside the
-      expected `~/repos/<org>/` shape (persona-invariant nicety; panel finding 12).
-- [ ] Worth a `--dry-run` that prints the plan (worktrees, what would be
-      rescued/carried/removed/listed) without mutating? The CLI rules discourage
-      `--dry-run` on opt-in destructive ops, but `--migrate` is a heavy one-shot.
-      Reviewer opinion split implicitly; left open.
+- [x] ~~Optional preflight warning when the repo is outside `~/repos/<org>/`~~ -
+      **declined.** The user places repos wherever they choose; migrate has no
+      business policing location.
+- [x] ~~Worth a `--dry-run`?~~ - **implemented.** `clone --migrate --dry-run`
+      runs the read-only preflight and prints the full plan (worktrees, rescues,
+      carry-overs, removals, ignored files, target note) without mutating. This
+      is the sanctioned exception to the "no `--dry-run` on opt-in destructive
+      flags" rule: `--migrate` is a heavy, hard-to-preview one-shot.
 
 ## References
 - Handoff punch list: `clone/docs/2026-06-26-migrate-rough-edges.md`

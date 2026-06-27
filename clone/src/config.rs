@@ -50,6 +50,8 @@ pub struct Config {
     pub mirrorpath: Option<PathBuf>,
     pub versioning: bool,
     pub verbose: bool,
+    /// With `Op::Migrate`, preview the plan without changing anything.
+    pub dry_run: bool,
     pub ssh_key: Option<PathBuf>,
     /// Last-resort default branch from `clone.cfg` `[clone] default`, used only
     /// when the remote does not advertise a default branch.
@@ -92,6 +94,11 @@ impl TryFrom<Cli> for Config {
             ));
         }
 
+        // --dry-run only previews a migration; it is meaningless elsewhere.
+        if cli.dry_run && !matches!(op, Op::Migrate) {
+            return Err(eyre!("--dry-run is only valid with --migrate"));
+        }
+
         let ssh_key = match &spec {
             Some(spec) => find_ssh_key_for_org(&spec.org)?.map(PathBuf::from),
             None => None,
@@ -109,6 +116,7 @@ impl TryFrom<Cli> for Config {
             mirrorpath: cli.mirrorpath.map(PathBuf::from),
             versioning: cli.versioning,
             verbose: cli.verbose,
+            dry_run: cli.dry_run,
             ssh_key,
             default_branch,
         })

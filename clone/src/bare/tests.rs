@@ -48,6 +48,7 @@ fn fixture_config(root: &Path, org: &str, repo: &str) -> Config {
         mirrorpath: None,
         versioning: false,
         verbose: false,
+        dry_run: false,
         ssh_key: None,
         default_branch: Some("main".to_string()),
     }

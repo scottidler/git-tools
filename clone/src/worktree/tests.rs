@@ -48,6 +48,7 @@ fn setup(root: &Path) -> (Config, PathBuf) {
         mirrorpath: None,
         versioning: false,
         verbose: false,
+        dry_run: false,
         ssh_key: None,
         default_branch: Some("main".to_string()),
     };
@@ -69,6 +70,7 @@ fn worktree_config(base: &Config, branch: &str) -> Config {
         mirrorpath: base.mirrorpath.clone(),
         versioning: base.versioning,
         verbose: base.verbose,
+        dry_run: base.dry_run,
         ssh_key: base.ssh_key.clone(),
         default_branch: base.default_branch.clone(),
     }
@@ -138,6 +140,7 @@ fn test_add_rejects_non_bare_container() {
         mirrorpath: None,
         versioning: false,
         verbose: false,
+        dry_run: false,
         ssh_key: None,
         default_branch: None,
     };

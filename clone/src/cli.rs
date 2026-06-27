@@ -49,6 +49,12 @@ pub struct Cli {
     )]
     pub migrate: bool,
 
+    #[arg(
+        long,
+        help = "with --migrate, print what would happen (worktrees, rescues, removals) without changing anything"
+    )]
+    pub dry_run: bool,
+
     #[arg(long, help = "turn on versioning; checkout in reponame/commit rather than reponame")]
     pub versioning: bool,
 

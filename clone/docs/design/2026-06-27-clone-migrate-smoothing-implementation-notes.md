@@ -114,6 +114,30 @@ per phase.
   directly, which is where the logic worth guarding lives.
 
 ### Open questions
-- The two design-doc open questions remain open and were NOT implemented (out of
-  scope for this pass): (1) an optional preflight warning when the repo sits
-  outside `~/repos/<org>/`; (2) whether `--migrate` should gain a `--dry-run`.
+- Resolved post-Phase-4: (1) persona-location preflight warning - **declined**
+  (the user places repos wherever they choose). (2) `--migrate --dry-run` -
+  **implemented** (see Phase 5).
+
+## Phase 5: `--migrate --dry-run`
+
+### Design decisions
+- `migrate::dry_run` runs the read-only preflight (rkvr/origin/connectivity probe
+  + worktree enumeration) and prints the plan to STDERR, then returns the flat
+  path so the wrapper leaves the user at the repo (the binary must return a
+  path per the wrapper contract; the repo root is the least-surprising choice).
+- Default branch for the preview is read via `git ls-remote --symref origin HEAD`
+  (`remote_default_branch`) - read-only, no `set-head` mutation.
+- `--dry-run` is rejected by `Config` validation unless the op is `Migrate`.
+- Extracted `is_dirty` / `has_unmerged` helpers shared by `rescue_work` and
+  `dry_run` so the preview and the real run detect the same conditions.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- The preview reports rkvr-missing / unreachable-origin / unknown-default as
+  "real run would abort" rather than aborting itself, so `--dry-run` always
+  completes and shows the full plan even when the real run could not proceed.
+
+### Open questions
+- None.
