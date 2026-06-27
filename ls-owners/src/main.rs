@@ -53,9 +53,10 @@ struct Cli {
     #[arg(short = 'd', long = "detailed")]
     detailed: bool,
 
-    /// Scan repos REMOTELY via the GitHub API for the given org(s) instead of
-    /// local paths. Requires GITHUB_TOKEN or GH_TOKEN. Space-separated or repeated.
-    #[arg(long = "org", value_name = "ORG", num_args = 1.., action = ArgAction::Append)]
+    /// Scan repos REMOTELY via the GitHub API for the given org(s) or user(s)
+    /// instead of local paths. Requires GITHUB_TOKEN or GH_TOKEN. Space-separated
+    /// or repeated.
+    #[arg(long = "org", value_name = "ORG_OR_USER", num_args = 1.., action = ArgAction::Append)]
     orgs: Vec<String>,
 
     /// One or more paths to Git repos (defaults to current directory)
@@ -399,27 +400,35 @@ fn print_detailed(entries: &[&Repo]) {
                 println!("  {}", s);
             }
             Value::Mapping(m) => {
-                if let Some(Value::Mapping(paths)) = m.get(Value::String("paths".into())) {
-                    println!("  paths:");
-                    for (p, owners) in paths {
-                        let path = p.as_str().unwrap_or_default();
-                        match owners {
-                            Value::Sequence(seq) => {
-                                let list: Vec<&str> = seq.iter().filter_map(Value::as_str).collect();
-                                if list.len() == 1 {
-                                    println!("    {}: {}", path, list[0]);
-                                } else {
-                                    println!("    {}: [{}]", path, list.join(", "));
+                match m.get(Value::String("paths".into())) {
+                    // A path -> owners mapping (owned/partial repos).
+                    Some(Value::Mapping(paths)) => {
+                        println!("  paths:");
+                        for (p, owners) in paths {
+                            let path = p.as_str().unwrap_or_default();
+                            match owners {
+                                Value::Sequence(seq) => {
+                                    let list: Vec<&str> = seq.iter().filter_map(Value::as_str).collect();
+                                    if list.len() == 1 {
+                                        println!("    {}: {}", path, list[0]);
+                                    } else {
+                                        println!("    {}: [{}]", path, list.join(", "));
+                                    }
                                 }
-                            }
-                            Value::String(s2) => {
-                                println!("    {}: {}", path, s2);
-                            }
-                            _ => {
-                                println!("    {}: {:?}", path, owners);
+                                Value::String(s2) => {
+                                    println!("    {}: {}", path, s2);
+                                }
+                                _ => {
+                                    println!("    {}: {:?}", path, owners);
+                                }
                             }
                         }
                     }
+                    // A marker string (MISSING_CODEOWNERS / EMPTY_CODEOWNERS).
+                    Some(Value::String(marker)) => {
+                        println!("  paths: {}", marker);
+                    }
+                    _ => {}
                 }
                 if let Some(Value::Sequence(authors)) = m.get(Value::String("authors".into())) {
                     println!("  authors:");
@@ -475,13 +484,13 @@ fn scan_remote(orgs: &[String], filter_set: &Option<BTreeSet<String>>) -> Result
         .context("failed to build HTTP client")?;
 
     let mut results = Vec::new();
-    for org in orgs {
-        let slugs = list_org_repos(org, &client).wrap_err_with(|| format!("listing repos for org '{}'", org))?;
-        debug!("scan_remote: org={} repo_count={}", org, slugs.len());
-        let exclude = match read_ex_employees(org) {
+    for owner in orgs {
+        let slugs = list_repos(owner, &client).wrap_err_with(|| format!("listing repos for '{}'", owner))?;
+        debug!("scan_remote: owner={} repo_count={}", owner, slugs.len());
+        let exclude = match read_ex_employees(owner) {
             Ok(set) => set,
             Err(err) => {
-                warn!("scan_remote: could not read ex-employees for {}: {}", org, err);
+                warn!("scan_remote: could not read ex-employees for {}: {}", owner, err);
                 BTreeSet::new()
             }
         };
@@ -508,14 +517,39 @@ fn github_token() -> Result<String> {
         .map_err(|_| eyre!("GitHub token missing; set GITHUB_TOKEN or GH_TOKEN"))
 }
 
-/// List every repo slug (`org/name`) in `org`, following pagination.
-fn list_org_repos(org: &str, client: &Client) -> Result<Vec<String>> {
-    debug!("list_org_repos: org={}", org);
+/// List every repo slug (`owner/name`) for `name`, which may be a GitHub
+/// organization OR a user account: try the org endpoint first, fall back to the
+/// user endpoint on 404 (so `--org scottidler` works as well as `--org cli`).
+fn list_repos(name: &str, client: &Client) -> Result<Vec<String>> {
+    debug!("list_repos: name={}", name);
+    for kind in ["orgs", "users"] {
+        if let Some(repos) = list_repos_for_kind(name, kind, client)? {
+            debug!("list_repos: name={} kind={} found={}", name, kind, repos.len());
+            return Ok(repos);
+        }
+    }
+    bail!(
+        "no GitHub organization or user named '{}' (both endpoints returned 404)",
+        name
+    )
+}
+
+/// Fetch all repo slugs under `/{kind}/{name}/repos` (kind = "orgs" | "users"),
+/// following pagination. Returns `None` when the account does not exist (404),
+/// so the caller can try the other kind.
+fn list_repos_for_kind(name: &str, kind: &str, client: &Client) -> Result<Option<Vec<String>>> {
     let mut page = 1;
     let mut all = Vec::new();
     loop {
-        let url = format!("https://api.github.com/orgs/{}/repos?per_page=100&page={}", org, page);
-        let repos: Vec<JsonValue> = client.get(&url).send()?.error_for_status()?.json()?;
+        let url = format!(
+            "https://api.github.com/{}/{}/repos?per_page=100&page={}",
+            kind, name, page
+        );
+        let resp = client.get(&url).send()?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let repos: Vec<JsonValue> = resp.error_for_status()?.json()?;
         if repos.is_empty() {
             break;
         }
@@ -530,8 +564,7 @@ fn list_org_repos(org: &str, client: &Client) -> Result<Vec<String>> {
         }
         page += 1;
     }
-    debug!("list_org_repos: org={} found={}", org, all.len());
-    Ok(all)
+    Ok(Some(all))
 }
 
 /// Fetch and classify `.github/CODEOWNERS` for `slug` via the contents API.
