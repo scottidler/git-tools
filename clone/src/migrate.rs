@@ -110,6 +110,10 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     // External dirs of the linked worktrees - orphaned by the swap; removed
     // (recoverably) once the migration is verified.
     let orphan_dirs: Vec<PathBuf> = worktrees.iter().skip(1).map(|w| w.path.clone()).collect();
+    // Recorded for the summary: git-ignored files (not carried over) and a
+    // build-dir `target` symlink (relocate-targets) that we only point at.
+    let ignored = ignored_files(flat);
+    let target_link = target_symlink(flat);
 
     // 2. RESCUE PASS (additive: only ADDS wip/* refs + moves dirty work to
     //    stashes; never rewrites/deletes a commit or branch). Bails BEFORE any
@@ -122,12 +126,6 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     // 4. Capture the currently checked-out branch and warn about dropped state.
     let current = current_branch(flat);
     warn_dropped_state(flat);
-    if !wip_branches.is_empty() {
-        eprintln!(
-            "migrate: rescued in-flight work to branches: {}",
-            wip_branches.join(", ")
-        );
-    }
 
     // 5. Clone the bare container from the LOCAL repo (captures every local ref
     //    at its local state - unpushed commits, local-only branches, wip/*).
@@ -181,6 +179,10 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     //    skipping branches already materialized (default/current) and detached
     //    worktrees (rescued as wip/* branches in step 2).
     let carried = recreate_linked_worktrees(&migrating, &worktrees, &materialized, &mut used_dirs)?;
+    let carried_names: Vec<String> = carried
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
     worktree_paths.extend(carried);
 
     // 9. Verify the staged container, then perform the recoverable swap.
@@ -207,22 +209,31 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
 
     // 11. Migration committed. Remove the now-orphaned external linked-worktree
     //     dirs and the rename-aside backup (recoverably, via rkvr rmrf).
+    let mut removed_orphans = Vec::new();
     for dir in &orphan_dirs {
-        if dir.exists()
-            && !dir.starts_with(flat)
-            && let Err(e) = remove_dir(dir)
-        {
-            warn!(
-                "migrate: could not remove orphaned worktree dir {}: {}",
-                dir.display(),
-                e
-            );
+        if dir.exists() && !dir.starts_with(flat) {
+            match remove_dir(dir) {
+                Ok(()) => removed_orphans.push(dir.clone()),
+                Err(e) => warn!(
+                    "migrate: could not remove orphaned worktree dir {}: {}",
+                    dir.display(),
+                    e
+                ),
+            }
         }
     }
     if let Err(e) = remove_dir(&backup) {
         warn!("migrate: could not remove backup {}: {}", backup.display(), e);
     }
 
+    print_summary(
+        flat,
+        &wip_branches,
+        &carried_names,
+        &removed_orphans,
+        &ignored,
+        target_link.as_deref(),
+    );
     Ok(final_worktree)
 }
 
@@ -457,23 +468,95 @@ fn current_branch(flat: &Path) -> Option<String> {
     if branch.is_empty() || branch == "HEAD" { None } else { Some(branch) }
 }
 
-/// Warn about machine-local state that does NOT travel with a bare clone.
+/// Warn about machine-local state that does NOT travel with a bare clone,
+/// summarizing the volume left behind.
 fn warn_dropped_state(flat: &Path) {
-    let git_dir = flat.join(".git");
-    let hooks = git_dir.join("hooks");
-    let has_custom_hooks = fs::read_dir(&hooks)
+    let hooks = flat.join(".git").join("hooks");
+    let custom_hooks = fs::read_dir(&hooks)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .any(|e| !e.file_name().to_string_lossy().ends_with(".sample"))
+                .filter(|e| !e.file_name().to_string_lossy().ends_with(".sample"))
+                .count()
         })
-        .unwrap_or(false);
-    if has_custom_hooks {
+        .unwrap_or(0);
+    if custom_hooks > 0 {
         warn!(
-            "migrate: custom .git/hooks in '{}' are machine-local and will NOT be carried over",
+            "migrate: {} custom .git/hooks in '{}' are machine-local and will NOT be carried over",
+            custom_hooks,
             flat.display()
         );
     }
-    warn!("migrate: machine-local state (extra .git/config remotes, alternates, reflogs) is not migrated");
+    let reflog = git::output(&["reflog", "show", "HEAD"], Some(flat), None)
+        .map(|o| o.stdout.lines().count())
+        .unwrap_or(0);
+    warn!(
+        "migrate: machine-local state not migrated: {} HEAD reflog entries, plus any extra \
+         .git/config remotes, alternates, and per-branch reflogs",
+        reflog
+    );
+}
+
+/// Git-ignored paths in `flat` (collapsed by directory), recorded for the
+/// summary - these do not travel with the migration.
+fn ignored_files(flat: &Path) -> Vec<String> {
+    git::output(&["status", "--porcelain", "--ignored=traditional"], Some(flat), None)
+        .map(|o| {
+            o.stdout
+                .lines()
+                .filter_map(|l| l.strip_prefix("!! "))
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The target of a `target` build-dir symlink in `flat` (relocate-targets
+/// setup), if present - advised on, not recreated.
+fn target_symlink(flat: &Path) -> Option<PathBuf> {
+    let link = flat.join("target");
+    match fs::symlink_metadata(&link) {
+        Ok(m) if m.file_type().is_symlink() => fs::read_link(&link).ok(),
+        _ => None,
+    }
+}
+
+/// Operator-facing migration summary. STDERR only - stdout is reserved for the
+/// single destination path the shell wrapper consumes.
+fn print_summary(
+    flat: &Path,
+    wip_branches: &[String],
+    carried: &[String],
+    removed_orphans: &[PathBuf],
+    ignored: &[String],
+    target_link: Option<&Path>,
+) {
+    eprintln!("Migrated '{}' to the bare-worktree layout.", flat.display());
+    if !wip_branches.is_empty() {
+        eprintln!("  Rescued in-flight work to branches: {}", wip_branches.join(", "));
+    }
+    if !carried.is_empty() {
+        eprintln!("  Carried over linked worktrees: {}", carried.join(", "));
+    }
+    if !removed_orphans.is_empty() {
+        let paths: Vec<String> = removed_orphans.iter().map(|p| p.display().to_string()).collect();
+        eprintln!(
+            "  Removed orphaned worktree dirs (recover with `rkvr rcvr`): {}",
+            paths.join(", ")
+        );
+    }
+    if !ignored.is_empty() {
+        eprintln!(
+            "  Git-ignored files were NOT carried over (recover from the backup with `rkvr rcvr`): {}",
+            ignored.join(", ")
+        );
+    }
+    if let Some(t) = target_link {
+        eprintln!(
+            "  Note: the old `target` symlink (-> {}) was not recreated; run `relocate-targets` \
+             to move build output off the OS disk.",
+            t.display()
+        );
+    }
 }
 
 /// Determine the REMOTE's default branch (not the local checked-out branch):

@@ -108,9 +108,18 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
   - `clone --flat org/repo` - legacy single checkout (`--versioning` implies it).
   - `clone --worktree <branch> [org/repo]` - add a worktree (raw arg matches an
     existing local/remote branch first; only a new branch is slugified), `cd` in.
-  - `clone --migrate org/repo` - convert a flat checkout to bare; refuses a dirty
-    or stashed tree, preserves unpushed commits + local-only branches via a
-    bare-clone-from-local, swaps recoverably, repairs worktree links.
+  - `clone --migrate [org/repo]` - convert a flat checkout to bare. With no
+    repospec, migrates the checkout you're standing in (resolves the enclosing
+    repo's main worktree, so it works from a subdirectory or a legacy linked
+    worktree). Read-only preflight first (requires `rkvr`, resolves the per-org
+    SSH key, probes connectivity). Then an additive rescue pass materializes every
+    dirty tree (main + linked worktrees), stash, and detached-HEAD worktree as a
+    `wip/*` branch - nothing git-tracked is lost. Carries linked worktrees into
+    the new container and `rkvr rmrf`s the orphaned external dirs. Preserves
+    unpushed commits + local-only branches via the bare-clone-from-local, swaps
+    recoverably, repairs worktree links. Bails before mutating on a mid-merge
+    tree. Git-ignored files (`.env`) are listed, not carried (recoverable from the
+    `rkvr`'d backup); a `target` symlink is noted, not recreated.
 - **Existing flat clones** are untouched until `--migrate`d; `clone org/repo` on
   one updates it in place and prints a `--migrate` hint (mixed ecosystem is
   supported). Discovery (`common::RepoDiscovery`) recognizes both shapes.

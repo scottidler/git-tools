@@ -458,6 +458,44 @@ fn test_migrate_skips_linked_worktree_on_default_branch() {
 }
 
 #[test]
+fn test_migrate_detects_ignored_files() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // An ignored file (git-ignored -> the tree is still "clean" to git).
+    fs::write(flat.join(".gitignore"), ".env\n").unwrap();
+    git_run(&flat, &["add", ".gitignore"]);
+    commit(&flat, "add gitignore");
+    fs::write(flat.join(".env"), "SECRET=1").unwrap();
+
+    let ignored = ignored_files(&flat);
+    assert!(
+        ignored.iter().any(|p| p.contains(".env")),
+        "the ignored .env must be detected for the summary; got {ignored:?}"
+    );
+
+    // Ignored files do not block migration (they aren't dirty to git).
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    assert!(worktree.join("README.md").is_file());
+}
+
+#[test]
+fn test_target_symlink_detected() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let dest = root.join("real-target");
+    fs::create_dir_all(&dest).unwrap();
+    let flat = root.join("repo");
+    fs::create_dir_all(&flat).unwrap();
+    std::os::unix::fs::symlink(&dest, flat.join("target")).unwrap();
+
+    assert_eq!(target_symlink(&flat).unwrap(), dest);
+    assert!(target_symlink(&root.join("no-such-repo")).is_none());
+}
+
+#[test]
 fn test_migrate_preserves_local_only_branch() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
