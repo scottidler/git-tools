@@ -54,7 +54,7 @@ pub fn setup_bare_container(config: &Config, spec: &RepoSpec) -> Result<PathBuf>
     write_git_pointer(&container)?;
 
     // 3. mandatory refspec fix: a --bare clone leaves remote.origin.fetch empty.
-    fix_fetch_refspec(&container)?;
+    fix_fetch_refspec(&container, None)?;
 
     // 4 + 5. materialize the always-present default-branch worktree.
     ensure_default_worktree(config, &container)
@@ -68,7 +68,7 @@ pub fn reconcile_container(config: &Config, container: &Path) -> Result<PathBuf>
     // The pointer should exist, but a half-finished prior run might have left it
     // out; writing it is cheap and idempotent.
     write_git_pointer(container)?;
-    fix_fetch_refspec(container)?;
+    fix_fetch_refspec(container, None)?;
     ensure_default_worktree(config, container)
 }
 
@@ -82,15 +82,16 @@ pub(crate) fn write_git_pointer(container: &Path) -> Result<()> {
 
 /// Repair the empty fetch refspec a `git clone --bare` leaves behind and
 /// populate remote-tracking branches. Without this, `git branch -r` is empty
-/// and worktrees cannot track `origin/*`.
-pub fn fix_fetch_refspec(container: &Path) -> Result<()> {
+/// and worktrees cannot track `origin/*`. `envs` carries network overrides such
+/// as a per-org `GIT_SSH_COMMAND` (the normal clone path passes `None`).
+pub fn fix_fetch_refspec(container: &Path, envs: Option<&[(&str, &str)]>) -> Result<()> {
     debug!("fix_fetch_refspec: container={:?}", container);
     git::run(
         &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
         Some(container),
         None,
     )?;
-    git::run(&["fetch", "origin"], Some(container), None)?;
+    git::run(&["fetch", "origin"], Some(container), envs)?;
     Ok(())
 }
 
