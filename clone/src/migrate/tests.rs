@@ -405,6 +405,59 @@ fn test_migrate_canonicalizes_target_path() {
 }
 
 #[test]
+fn test_migrate_carries_linked_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // A clean linked worktree on its own branch.
+    let linked = root.join("repo-side");
+    git_run(&flat, &["worktree", "add", "-b", "side", linked.to_str().unwrap()]);
+
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let container = worktree.parent().unwrap();
+
+    // The linked branch is recreated as a native worktree inside the container.
+    let side = container.join("side");
+    assert!(
+        side.is_dir(),
+        "linked worktree 'side' must be carried into the container"
+    );
+    let out = git::output(&["status", "--porcelain"], Some(&side), None).unwrap();
+    assert!(out.status.success(), "carried worktree must be functional");
+
+    // The old external orphan dir is removed (recoverably).
+    assert!(!linked.exists(), "orphaned external worktree dir must be removed");
+}
+
+#[test]
+fn test_migrate_skips_linked_worktree_on_default_branch() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // Main worktree moves to a feature branch; a linked worktree sits on the
+    // DEFAULT branch (main). Recreating it would be a fatal double-checkout, so
+    // it must be skipped - migration must still succeed.
+    git_run(&flat, &["checkout", "-b", "feature"]);
+    let linked = root.join("repo-main");
+    git_run(&flat, &["worktree", "add", linked.to_str().unwrap(), "main"]);
+
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let container = worktree.parent().unwrap();
+
+    assert_eq!(worktree, flat.join("main"), "default worktree must be main");
+    assert!(container.join("main").is_dir(), "default worktree present");
+    assert!(container.join("feature").is_dir(), "current (feature) worktree present");
+    assert!(
+        !linked.exists(),
+        "orphaned external dir for the default-branch worktree must be removed"
+    );
+}
+
+#[test]
 fn test_migrate_preserves_local_only_branch() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

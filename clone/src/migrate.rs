@@ -107,6 +107,9 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     let ssh = ssh_borrow.as_deref();
     check_connectivity(flat, ssh)?;
     let worktrees = list_worktrees(flat)?;
+    // External dirs of the linked worktrees - orphaned by the swap; removed
+    // (recoverably) once the migration is verified.
+    let orphan_dirs: Vec<PathBuf> = worktrees.iter().skip(1).map(|w| w.path.clone()).collect();
 
     // 2. RESCUE PASS (additive: only ADDS wip/* refs + moves dirty work to
     //    stashes; never rewrites/deletes a commit or branch). Bails BEFORE any
@@ -154,6 +157,10 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     //    then add the previously checked-out branch's worktree when it differs.
     let default = origin_default_branch(&migrating, default_fallback, ssh)?;
     let mut worktree_paths = vec![add_default_worktree(&migrating, &default)?];
+    // Branches already turned into a worktree, and the dir basenames already
+    // used - guard against a double-checkout (fatal) and dir-name collisions.
+    let mut materialized: HashSet<String> = HashSet::from([default.clone()]);
+    let mut used_dirs: HashSet<String> = HashSet::from([default.clone()]);
     git::run(
         &["symbolic-ref", "HEAD", &format!("refs/heads/{}", default)],
         Some(&migrating),
@@ -165,11 +172,18 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
         && cur != "HEAD"
         && !cur.is_empty()
     {
-        let dir = git::slugify_branch(cur);
+        let dir = unique_dir(&git::slugify_branch(cur), &mut used_dirs);
         worktree_paths.push(add_named_worktree(&migrating, &dir, cur)?);
+        materialized.insert(cur.to_string());
     }
 
-    // 8. Verify the staged container, then perform the recoverable swap.
+    // 8. Recreate the previously-linked worktrees natively inside the container,
+    //    skipping branches already materialized (default/current) and detached
+    //    worktrees (rescued as wip/* branches in step 2).
+    let carried = recreate_linked_worktrees(&migrating, &worktrees, &materialized, &mut used_dirs)?;
+    worktree_paths.extend(carried);
+
+    // 9. Verify the staged container, then perform the recoverable swap.
     verify(&migrating.join(&default), &origin)?;
 
     let backup = sibling(flat, "backup")?;
@@ -191,7 +205,20 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
         return Err(e).wrap_err("migrated container failed repair/verification after swap");
     }
 
-    // 10. Migration committed; remove the backup (recoverable via rkvr rmrf).
+    // 11. Migration committed. Remove the now-orphaned external linked-worktree
+    //     dirs and the rename-aside backup (recoverably, via rkvr rmrf).
+    for dir in &orphan_dirs {
+        if dir.exists()
+            && !dir.starts_with(flat)
+            && let Err(e) = remove_dir(dir)
+        {
+            warn!(
+                "migrate: could not remove orphaned worktree dir {}: {}",
+                dir.display(),
+                e
+            );
+        }
+    }
     if let Err(e) = remove_dir(&backup) {
         warn!("migrate: could not remove backup {}: {}", backup.display(), e);
     }
@@ -509,6 +536,52 @@ fn add_named_worktree(container: &Path, dir: &str, branch: &str) -> Result<PathB
     git::run(&["worktree", "add", dir, branch], Some(container), None)
         .wrap_err_with(|| format!("git worktree add {} {} in {}", dir, branch, container.display()))?;
     Ok(container.join(dir))
+}
+
+/// Recreate each previously-linked worktree (every entry after the main one) as
+/// a native worktree inside the new container. Skips branches already
+/// materialized (default/current) - re-adding one is a fatal double-checkout -
+/// and detached worktrees, which were rescued as `wip/*` branches. Returns the
+/// new worktree paths (to repair after the swap).
+fn recreate_linked_worktrees(
+    container: &Path,
+    worktrees: &[Worktree],
+    materialized: &HashSet<String>,
+    used_dirs: &mut HashSet<String>,
+) -> Result<Vec<PathBuf>> {
+    debug!(
+        "recreate_linked_worktrees: container={:?} count={}",
+        container,
+        worktrees.len().saturating_sub(1)
+    );
+    let mut created = Vec::new();
+    for wt in worktrees.iter().skip(1) {
+        match &wt.branch {
+            Some(branch) if !materialized.contains(branch) => {
+                let dir = unique_dir(&git::slugify_branch(branch), used_dirs);
+                created.push(add_named_worktree(container, &dir, branch)?);
+            }
+            Some(branch) => debug!("recreate_linked_worktrees: '{}' already materialized; skipping", branch),
+            None => warn!(
+                "migrate: linked worktree {} is detached; rescued as a wip/* branch, no worktree recreated",
+                wt.path.display()
+            ),
+        }
+    }
+    Ok(created)
+}
+
+/// A collision-free worktree directory basename under the container.
+fn unique_dir(slug: &str, used: &mut HashSet<String>) -> String {
+    let base = if slug.is_empty() { "worktree".to_string() } else { slug.to_string() };
+    let mut dir = base.clone();
+    let mut n = 1;
+    while used.contains(&dir) {
+        dir = format!("{}-{}", base, n);
+        n += 1;
+    }
+    used.insert(dir.clone());
+    dir
 }
 
 /// Repair worktree admin files after the container rename, passing each
