@@ -29,14 +29,22 @@ clone() {
 # (a .bare/ dir + a .git pointer file), redirects into its default-branch
 # worktree -- so you keep landing "in the repo," now meaning its worktree.
 #
+# Directional carve-out: arriving at a container from OUTSIDE (a fresh
+# `cd ~/repos/org/repo`, `z repo`, an IDE jump) redirects into the worktree, as
+# before. But stepping UP into the container from one of its own worktrees
+# (`cd ..` out of `<repo>/main`) is a deliberate move to the bare root -- honor
+# it. We tell the two apart with $OLDPWD: if the previous dir is a descendant of
+# the container root, we ascended from within, so don't bounce back.
+#
 # Escape hatch: set NO_BARE_REDIRECT (any non-empty value) to suppress the
 # redirect for one directory change -- e.g. to land on the bare container root
-# itself. `cdbare` (below) does this for you. Because zsh hooks are dynamically
-# scoped, a `local NO_BARE_REDIRECT=1` in the caller is visible here, so the
-# suppression is scoped to that single cd and never leaks to later ones.
+# itself when arriving from outside. `cdbare` (below) does this for you. Because
+# zsh hooks are dynamically scoped, a `local NO_BARE_REDIRECT=1` in the caller is
+# visible here, so the suppression is scoped to that single cd and never leaks.
 _clone_chpwd_bare() {
     [[ -n "$NO_BARE_REDIRECT" ]] && return
     [[ -d .bare && -f .git ]] || return
+    [[ -n "$OLDPWD" && "$OLDPWD" == "$PWD"/* ]] && return
     local branch
     branch=$(git --git-dir=.bare symbolic-ref --short HEAD 2>/dev/null) || return
     [[ -n "$branch" && -d "$branch" ]] && builtin cd -- "$branch"
