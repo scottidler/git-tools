@@ -28,11 +28,27 @@ clone() {
 # change (cd, pushd, z/zoxide) and, when the new directory is a bare container
 # (a .bare/ dir + a .git pointer file), redirects into its default-branch
 # worktree -- so you keep landing "in the repo," now meaning its worktree.
+#
+# Escape hatch: set NO_BARE_REDIRECT (any non-empty value) to suppress the
+# redirect for one directory change -- e.g. to land on the bare container root
+# itself. `cdbare` (below) does this for you. Because zsh hooks are dynamically
+# scoped, a `local NO_BARE_REDIRECT=1` in the caller is visible here, so the
+# suppression is scoped to that single cd and never leaks to later ones.
 _clone_chpwd_bare() {
+    [[ -n "$NO_BARE_REDIRECT" ]] && return
     [[ -d .bare && -f .git ]] || return
     local branch
     branch=$(git --git-dir=.bare symbolic-ref --short HEAD 2>/dev/null) || return
     [[ -n "$branch" && -d "$branch" ]] && builtin cd -- "$branch"
+}
+
+# cd to a bare container ROOT without being redirected into its default-branch
+# worktree. `cdbare` (no arg) parks you on the container root of wherever you
+# are; `cdbare <path>` cds there first. Needed because the chpwd shim otherwise
+# bounces every `cd` into a bare container straight back into the worktree.
+cdbare() {
+    local NO_BARE_REDIRECT=1
+    builtin cd -- "${1:-$PWD}"
 }
 
 typeset -ga chpwd_functions
