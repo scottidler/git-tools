@@ -1,5 +1,7 @@
 use super::*;
 use std::fs;
+
+use common::git;
 use tempfile::TempDir;
 
 fn git_run(dir: &Path, args: &[&str]) {

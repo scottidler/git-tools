@@ -56,3 +56,41 @@ Design doc: `docs/design/2026-06-28-consolidate-worktree-primitives.md`
 
 ### Open questions
 None.
+
+## Phase 2: Rewire the `worktree` tool
+
+### Design decisions
+- `switch` is now a 3-line thin delegator: DEBUG entry log, then
+  `bare::resolve_and_add(container, raw_branch, default_branch)` -
+  `worktree/src/switch.rs::switch`. The public signature is unchanged
+  so the caller in `lib.rs::run` required zero edits.
+- Deleted `ensure_or_add` and the local `ref_exists` from `switch.rs`
+  entirely; the primitive equivalents now live in `common::bare`. The
+  `ref_exists` in `prune.rs` was NOT touched (Phase 4's job, per the
+  phase boundary in the design doc).
+- The switch tests retained their full coverage (all 5 existing cases).
+  `switch` still has the same observable behavior from the test's
+  perspective; the tests just exercise the delegation path now. Because
+  the tests needed `git::output` directly and the old `switch.rs` had
+  `use common::git;` (which `use super::*` brought in), the import was
+  added explicitly to `switch/tests.rs` - `worktree/src/switch/tests.rs`.
+- No assertion text was changed: the slug-collision message from
+  `common::bare::add_worktree` contains `"slug collision"` (the
+  substring the test checks), matching the design doc's note that
+  `ReuseOrBail`'s message still contains that substring.
+
+### Deviations
+- None. The phase spec said to delegate `switch` to `resolve_and_add`,
+  delete `ensure_or_add` and the local `ref_exists`, and keep the tests
+  green. That is exactly what was done.
+
+### Tradeoffs
+- Kept all 5 existing switch tests rather than thinning to a single smoke
+  test. The design doc permitted thinning ("you may thin them to a single
+  smoke test"), but the tests run quickly and deleting them would remove
+  end-to-end coverage of the delegation path for each of the three ref
+  cases plus the slug-collision and idempotency invariants. Keeping them
+  costs nothing and catches any future regression in `resolve_and_add`.
+
+### Open questions
+- None.
