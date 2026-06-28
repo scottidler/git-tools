@@ -1,3 +1,4 @@
+pub mod bare;
 pub mod error;
 pub mod git;
 pub mod language;

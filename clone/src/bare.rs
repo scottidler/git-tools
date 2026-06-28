@@ -10,18 +10,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::git::{self, RepoSpec};
-use eyre::{Result, WrapErr, eyre};
+use eyre::{Result, WrapErr};
 use log::{debug, warn};
 
 use crate::config::Config;
 use crate::transport;
 
-/// Whether `path` is a bare container (`.bare/` present). A bare container also
-/// carries a `.git` pointer file, so callers must check this before treating a
-/// `.git` as a flat checkout.
-pub fn is_bare_container(path: &Path) -> bool {
-    path.join(".bare").is_dir()
-}
+// Bare-container primitives shared with `worktree` live in `common::bare`; a
+// bare container also carries a `.git` pointer file, so callers must check
+// `is_bare_container` before treating a `.git` as a flat checkout.
+pub use common::bare::{default_branch, is_bare_container};
 
 /// Set up a fresh bare container for `spec`, returning the canonical
 /// default-branch worktree path the wrapper `cd`s into (or the container itself
@@ -93,48 +91,6 @@ pub fn fix_fetch_refspec(container: &Path, envs: Option<&[(&str, &str)]>) -> Res
     )?;
     git::run(&["fetch", "origin"], Some(container), envs)?;
     Ok(())
-}
-
-/// Determine the container's default branch. A fresh `git clone --bare` sets
-/// `HEAD` to the remote default, so `symbolic-ref --short HEAD` yields it; fall
-/// back to `origin/HEAD`, then to `git remote set-head origin -a`, then to the
-/// `clone.cfg` `[clone] default`. Never hardcodes `main`.
-pub fn default_branch(container: &Path, fallback: Option<&str>) -> Result<String> {
-    debug!("default_branch: container={:?} fallback={:?}", container, fallback);
-
-    if let Some(branch) = symbolic_ref_short(container, "HEAD") {
-        return Ok(branch);
-    }
-    if let Some(branch) = symbolic_ref_short(container, "refs/remotes/origin/HEAD") {
-        return Ok(branch);
-    }
-
-    // origin/HEAD may be unset; ask the remote to populate it, then retry.
-    let _ = git::run(&["remote", "set-head", "origin", "-a"], Some(container), None);
-    if let Some(branch) = symbolic_ref_short(container, "refs/remotes/origin/HEAD") {
-        return Ok(branch);
-    }
-
-    if let Some(branch) = fallback {
-        warn!("default_branch: falling back to clone.cfg default '{}'", branch);
-        return Ok(branch.to_string());
-    }
-
-    Err(eyre!(
-        "could not determine default branch for bare container '{}'",
-        container.display()
-    ))
-}
-
-/// `git symbolic-ref --short <refname>`, returning the branch name with any
-/// `origin/` prefix stripped, or `None` when the ref is unset/missing.
-fn symbolic_ref_short(container: &Path, refname: &str) -> Option<String> {
-    let out = git::output(&["symbolic-ref", "--short", refname], Some(container), None).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let branch = out.stdout.trim().trim_start_matches("origin/").to_string();
-    if branch.is_empty() { None } else { Some(branch) }
 }
 
 /// Ensure the default-branch worktree exists, returning its path. For a

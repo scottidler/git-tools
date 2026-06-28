@@ -6,6 +6,7 @@ A Rust workspace of CLI tools for git repository discovery, analysis, and manage
 
 - **`common/`** - Shared library with git URL parsing, repo discovery, language detection, and parallel execution
 - **`clone/`** - Clone repos from various spec formats (org/repo, SSH, HTTPS)
+- **`worktree/`** - Switch to / create / list worktrees inside a bare container (the bare-layout navigation tool)
 - **`ls-git-repos/`** - Recursively discover local git repos with language filtering
 - **`ls-github-repos/`** - List GitHub org/user repos via API with language filtering
 - **`ls-owners/`** - Detect CODEOWNERS files and identify un-owned code paths
@@ -106,8 +107,9 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
 - **Commands:**
   - `clone org/repo` - bare container + default worktree, `cd` into it.
   - `clone --flat org/repo` - legacy single checkout (`--versioning` implies it).
-  - `clone --worktree <branch> [org/repo]` - add a worktree (raw arg matches an
-    existing local/remote branch first; only a new branch is slugified), `cd` in.
+  - Worktree create/switch/list/prune moved OUT of `clone` into the `worktree`
+    tool (`worktree <branch>` / `worktree` picker / `worktree --list` /
+    `worktree --prune`). `clone` no longer has `--worktree`.
   - `clone --migrate [org/repo]` - convert a flat checkout to bare. With no
     repospec, migrates the checkout you're standing in (resolves the enclosing
     repo's main worktree, so it works from a subdirectory or a legacy linked
@@ -125,10 +127,17 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
   supported). Discovery (`common::RepoDiscovery`) recognizes both shapes.
 - **`clone.cfg` `[clone] default-layout = bare|flat`** sets the per-machine
   default (CLI `--flat` overrides it; built-in default is `bare`).
-- **Navigation shim** (`shell-functions.sh`): a zsh `chpwd` hook redirects `cd`/
-  `z`/pushd into a bare container's default-branch worktree, so any way of
-  arriving at the container lands you "in the repo." The `clone` wrapper still
-  only consumes the binary's stdout (the destination path) - unchanged.
+- **No `cd` navigation magic** (`shell-functions.sh`): both wrappers use the
+  same contract - the binary prints a destination path to stdout, the shell
+  function `cd`s into it. `clone()` does this on a fresh clone; `worktree()` does
+  it for `worktree <branch>` (switch-or-create), while the no-arg list form and
+  any flag pass straight through (no `cd`). The old `chpwd` shim that redirected
+  every `cd`/`z`/pushd into a bare container's default worktree was removed: it
+  intercepted all navigation and stranded you on the bare root (relative
+  `cd ..`/`cd ../sibling` then resolved against the wrong level). Arriving at a
+  bare container now lands you on the container root (standard behavior); worktree
+  navigation lives in the separate `worktree` binary, used like `clone` - NOT a
+  `git` alias or `chpwd` hook.
 
 Module map: `clone/src/{cli,config,transport,bare,worktree,migrate}.rs` over a
 thin `main.rs` + testable `lib.rs`.

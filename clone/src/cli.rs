@@ -15,7 +15,7 @@ pub struct Cli {
     pub log_level: LevelFilter,
 
     #[arg(
-        help = "Repository specification. Accepts: org/repo, https://github.com/org/repo, git@github.com:org/repo, ssh://git@github.com/org/repo, git://github.com/org/repo. Optional with --worktree run inside a container."
+        help = "Repository specification. Accepts: org/repo, https://github.com/org/repo, git@github.com:org/repo, ssh://git@github.com/org/repo, git://github.com/org/repo. Optional with --migrate run inside a checkout."
     )]
     pub repospec: Option<String>,
 
@@ -36,12 +36,6 @@ pub struct Cli {
         help = "use the legacy flat single-checkout layout instead of bare + worktrees"
     )]
     pub flat: bool,
-
-    #[arg(
-        long,
-        help = "add a worktree for <branch> to an existing bare container, then cd into it"
-    )]
-    pub worktree: Option<String>,
 
     #[arg(
         long,

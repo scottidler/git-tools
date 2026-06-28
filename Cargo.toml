@@ -2,6 +2,7 @@
 members = [
   "common",
   "clone",
+  "worktree",
   "reposlug",
   "ls-git-repos",
   "ls-github-repos",
@@ -20,4 +21,4 @@ log = "0.4.32"
 common = { path = "common" }
 
 [workspace.package]
-version = "0.2.12"
+version = "0.2.13"

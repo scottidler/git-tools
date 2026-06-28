@@ -32,9 +32,9 @@ tasks:
     bash: |
       cargo test --workspace --all-features
 
-  # Test the shell-functions.sh bare-container navigation shim
+  # Test the shell-functions.sh clone() wrapper contract
   shell-test:
-    help: "Test the shell-functions.sh navigation shim"
+    help: "Test the shell-functions.sh clone() wrapper contract"
     bash: |
       zsh tests/shell-functions.zsh
 

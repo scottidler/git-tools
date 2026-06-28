@@ -24,9 +24,6 @@ pub enum Layout {
 pub enum Op {
     /// Clone (or update) a repository. Requires `spec`.
     Clone,
-    /// Add a worktree for the given (raw) branch argument to an existing bare
-    /// container. `spec` is optional (derived from CWD when absent).
-    AddWorktree(String),
     /// Convert an existing flat checkout into a bare container. `spec` is
     /// optional (derived from the current directory's enclosing repo when
     /// absent).
@@ -40,7 +37,7 @@ pub enum Op {
 /// from `clone.cfg`.
 #[derive(Debug)]
 pub struct Config {
-    /// `None` only for `--worktree` run inside a container (no `org/repo` arg).
+    /// `None` only for `--migrate` run inside a checkout (no `org/repo` arg).
     pub spec: Option<RepoSpec>,
     pub op: Op,
     pub layout: Layout,
@@ -69,29 +66,18 @@ impl TryFrom<Cli> for Config {
             None => None,
         };
 
-        if cli.worktree.is_some() && cli.migrate {
-            return Err(eyre!("--worktree cannot be combined with --migrate"));
-        }
+        let op = if cli.migrate { Op::Migrate } else { Op::Clone };
 
-        let op = match (cli.worktree, cli.migrate) {
-            (Some(branch), _) => Op::AddWorktree(branch),
-            (None, true) => Op::Migrate,
-            (None, false) => Op::Clone,
-        };
-
-        // Validation: only clone needs a repospec; --worktree and --migrate can
-        // derive their target from the current directory, so a repospec is
-        // optional for both.
+        // Validation: only clone needs a repospec; --migrate can derive its
+        // target from the current directory, so a repospec is optional there.
         if matches!(op, Op::Clone) && spec.is_none() {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
 
         // --flat (explicit, or implied by --versioning) selects the legacy
-        // layout, which has no worktrees and nothing to migrate to.
-        if (cli.flat || cli.versioning) && matches!(op, Op::AddWorktree(_) | Op::Migrate) {
-            return Err(eyre!(
-                "--flat/--versioning cannot be combined with --worktree or --migrate"
-            ));
+        // layout, which has nothing to migrate to.
+        if (cli.flat || cli.versioning) && matches!(op, Op::Migrate) {
+            return Err(eyre!("--flat/--versioning cannot be combined with --migrate"));
         }
 
         // --dry-run only previews a migration; it is meaningless elsewhere.

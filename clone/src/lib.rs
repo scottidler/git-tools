@@ -5,7 +5,6 @@ pub mod cli;
 pub mod config;
 pub mod migrate;
 pub mod transport;
-pub mod worktree;
 
 pub use cli::Cli;
 pub use config::{Config, Layout, Op};
@@ -30,7 +29,6 @@ pub fn run(config: Config) -> Result<PathBuf> {
                 .expect("Op::Clone requires a spec (enforced in Config::try_from)");
             run_clone(&config, &spec)
         }
-        Op::AddWorktree(branch) => worktree::add(&config, branch),
         Op::Migrate => {
             // With a spec, the target is `<clonepath>/<org>/<repo>`; with no
             // spec, migrate the flat checkout the user is standing in (derived
