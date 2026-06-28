@@ -155,6 +155,12 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     //    always-present default-branch worktree, reset the container HEAD to it,
     //    then add the previously checked-out branch's worktree when it differs.
     let default = origin_default_branch(&migrating, default_fallback, ssh)?;
+    // The default-branch worktree dir is the slug, not the raw branch name (the
+    // primitive derives `slugify_branch`); a slashed/dotted/mixed-case default
+    // lands at e.g. `release-1-2`, not the nested `release/1.2`. Use the slug for
+    // every filesystem join below (verify, final swap), or migration of such a
+    // default verifies a non-existent path and rolls back.
+    let default_dir = git::slugify_branch(&default);
     let mut worktree_paths = vec![add_default_worktree(&migrating, &default)?];
     // Branches already turned into a worktree - guard against a double-checkout
     // (fatal). Dir-name collisions are now handled inside the primitive's
@@ -194,7 +200,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     worktree_paths.extend(carried);
 
     // 9. Verify the staged container, then perform the recoverable swap.
-    verify(&migrating.join(&default), &origin)?;
+    verify(&migrating.join(&default_dir), &origin)?;
 
     let backup = sibling(flat, "backup")?;
     remove_dir(&backup)?;
@@ -208,7 +214,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     // 9. Worktree admin files store absolute paths recorded at the staging path;
     //    repair them to the final location, then re-verify. A failure in EITHER
     //    step rolls back to the original (backup).
-    let final_worktree = flat.join(&default);
+    let final_worktree = flat.join(&default_dir);
     if let Err(e) = repair_worktrees(flat, &worktree_paths).and_then(|()| verify(&final_worktree, &origin)) {
         let _ = remove_dir(flat);
         let _ = fs::rename(&backup, flat);

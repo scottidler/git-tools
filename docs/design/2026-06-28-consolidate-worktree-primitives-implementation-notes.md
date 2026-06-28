@@ -193,3 +193,36 @@ None.
 
 ### Open questions
 - None.
+
+## Post-implementation audit follow-up
+
+The cross-model review-panel (Architect/Gemini, Staff Engineer/Codex) audited the
+committed implementation in Mode 2. The reviewers split; the Staff Engineer found a
+real must-fix that the Architect missed, verified independently against the code.
+
+### Must-fix (fixed here)
+- `clone/src/migrate.rs::migrate_flat_to_bare` created the default-branch worktree via
+  the primitive at the SLUG dir (`add_default_worktree` returns `worktree_paths[0]`), but
+  then verified and swapped against the RAW default name: `verify(&migrating.join(&default))`
+  and `final_worktree = flat.join(&default)`. For a slashed/dotted/mixed-case default
+  (e.g. `release/1.2` -> dir `release-1-2`), those joins point at a non-existent path, so
+  `verify` bailed and the WHOLE migration rolled back - exactly the slashed-default rollout
+  case the doc flagged. `main`/`master` were unaffected (slug == raw), which is why every
+  existing test stayed green and the Phase 3 slug test (slashed LINKED worktree) did not
+  catch it.
+- Fix: derive `default_dir = git::slugify_branch(&default)` once and use it for both
+  filesystem joins (the raw `default` is still used for the `symbolic-ref HEAD` ref and the
+  `materialized` branch set, which are branch names, not paths).
+- Regression test added: `migrate::tests::test_migrate_slugifies_slashed_default_worktree_dir`
+  - a remote whose default is `release/1.2` migrates successfully to a `release-1-2` worktree.
+  Verified the test FAILS against the pre-fix code (migration rolls back) and passes after.
+
+### Notes-accuracy corrections (from the audit)
+- The earlier claim that "only slashed/spaced defaults move" is too narrow: `slugify_branch`
+  lowercases and collapses ANY non-alphanumeric run, so dotted (`release.1`) and mixed-case
+  default branch names also change dir. `main`/`master`/`feature`/`side` are genuinely
+  unchanged. This widens (slightly) the blast radius noted in Phase 3.
+- The Phase 4 `Command::new("git")` note said "exactly once in the workspace." Accurate for
+  PRODUCTION code (the sole occurrence is the runner at `common/src/git/run.rs`), but
+  test/other-crate occurrences exist (e.g. `ls-owners`, `ls-stale-prs`); the grep claim
+  should have been scoped to `clone`/`worktree`/`common::bare` production paths.

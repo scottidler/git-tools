@@ -21,4 +21,4 @@ log = "0.4.32"
 common = { path = "common" }
 
 [workspace.package]
-version = "0.2.15"
+version = "0.2.16"

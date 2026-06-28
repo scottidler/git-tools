@@ -466,6 +466,59 @@ fn test_migrate_slugifies_slashed_linked_worktree_dir() {
 }
 
 #[test]
+fn test_migrate_slugifies_slashed_default_worktree_dir() {
+    // Regression (review-panel audit): when the REMOTE default branch is slashed
+    // (e.g. `release/1.2`), the default worktree lands at the slug dir
+    // `release-1-2`, but migrate used to verify and swap against the raw nested
+    // path `release/1.2`. That path doesn't exist, so verify bailed and the whole
+    // migration rolled back. The default dir must be slugified everywhere; the
+    // migration must commit.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // A remote whose default branch is the slashed `release/1.2`.
+    let seed = root.join("seed");
+    fs::create_dir_all(&seed).unwrap();
+    git_run(&seed, &["init", "-b", "release/1.2"]);
+    fs::write(seed.join("README.md"), "hello").unwrap();
+    git_run(&seed, &["add", "."]);
+    commit(&seed, "init");
+    let remote = root.join("remote.git");
+    git_run(
+        root,
+        &["clone", "--bare", seed.to_str().unwrap(), remote.to_str().unwrap()],
+    );
+    git_run(&remote, &["symbolic-ref", "HEAD", "refs/heads/release/1.2"]);
+
+    let flat = root.join("work").join("org").join("repo");
+    fs::create_dir_all(flat.parent().unwrap()).unwrap();
+    git_run(root, &["clone", remote.to_str().unwrap(), flat.to_str().unwrap()]);
+
+    let worktree = migrate_flat_to_bare(&flat, Some("release/1.2")).unwrap();
+
+    // Migration committed to a bare container, default worktree at the SLUG dir.
+    assert!(
+        bare::is_bare_container(&flat),
+        "migration must have committed (no rollback)"
+    );
+    assert_eq!(
+        worktree,
+        flat.join("release-1-2"),
+        "default worktree dir must be slugified"
+    );
+    assert!(
+        flat.join("release-1-2").is_dir(),
+        "slugified default worktree must exist"
+    );
+    assert!(
+        !flat.join("release").exists(),
+        "the raw nested 'release/1.2' default path must NOT be created"
+    );
+    let out = git::output(&["status", "--porcelain"], Some(&worktree), None).unwrap();
+    assert!(out.status.success(), "slugged default worktree must be functional");
+}
+
+#[test]
 fn test_migrate_skips_linked_worktree_on_default_branch() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
