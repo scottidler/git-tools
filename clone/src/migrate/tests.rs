@@ -431,6 +431,40 @@ fn test_migrate_carries_linked_worktree() {
     assert!(!linked.exists(), "orphaned external worktree dir must be removed");
 }
 
+/// Slug-unification (Phase 3): a linked worktree on a SLASHED branch is recreated
+/// at the slugified dir (`feature/auth` -> `feature-auth`), matching what the
+/// `worktree` tool produces - not the raw nested `feature/auth` path the old
+/// `clone --migrate` would have created.
+#[test]
+fn test_migrate_slugifies_slashed_linked_worktree_dir() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let remote = make_remote(root);
+    let flat = make_flat(root, &remote);
+
+    // A clean linked worktree on a slashed branch.
+    let linked = root.join("repo-auth");
+    git_run(
+        &flat,
+        &["worktree", "add", "-b", "feature/auth", linked.to_str().unwrap()],
+    );
+
+    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let container = worktree.parent().unwrap();
+
+    // The carried worktree lands at the slug dir, not the raw nested path.
+    assert!(
+        container.join("feature-auth").is_dir(),
+        "slashed branch must be carried at the slugified dir 'feature-auth'"
+    );
+    assert!(
+        !container.join("feature").join("auth").exists(),
+        "the raw nested 'feature/auth' path must NOT be created"
+    );
+    let out = git::output(&["status", "--porcelain"], Some(&container.join("feature-auth")), None).unwrap();
+    assert!(out.status.success(), "slugged worktree must be functional");
+}
+
 #[test]
 fn test_migrate_skips_linked_worktree_on_default_branch() {
     let tmp = TempDir::new().unwrap();

@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use common::bare::{AddSpec, Collision, Source};
 use common::git;
 use eyre::{Result, WrapErr, bail, eyre};
 use log::{debug, warn};
@@ -155,10 +156,10 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     //    then add the previously checked-out branch's worktree when it differs.
     let default = origin_default_branch(&migrating, default_fallback, ssh)?;
     let mut worktree_paths = vec![add_default_worktree(&migrating, &default)?];
-    // Branches already turned into a worktree, and the dir basenames already
-    // used - guard against a double-checkout (fatal) and dir-name collisions.
+    // Branches already turned into a worktree - guard against a double-checkout
+    // (fatal). Dir-name collisions are now handled inside the primitive's
+    // `Collision::Uniquify`, so no separate dir-name set is tracked here.
     let mut materialized: HashSet<String> = HashSet::from([default.clone()]);
-    let mut used_dirs: HashSet<String> = HashSet::from([default.clone()]);
     git::run(
         &["symbolic-ref", "HEAD", &format!("refs/heads/{}", default)],
         Some(&migrating),
@@ -170,15 +171,22 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
         && cur != "HEAD"
         && !cur.is_empty()
     {
-        let dir = unique_dir(&git::slugify_branch(cur), &mut used_dirs);
-        worktree_paths.push(add_named_worktree(&migrating, &dir, cur)?);
+        // `Uniquify`, not `ReuseOrBail`: the current branch's slug can collide
+        // with the default dir (e.g. `feature/x` vs a `feature-x` default);
+        // `ReuseOrBail` would bail fatally there, so uniquify the dir instead.
+        worktree_paths.push(add_worktree(
+            &migrating,
+            cur,
+            Source::ExistingLocal,
+            Collision::Uniquify,
+        )?);
         materialized.insert(cur.to_string());
     }
 
     // 8. Recreate the previously-linked worktrees natively inside the container,
     //    skipping branches already materialized (default/current) and detached
     //    worktrees (rescued as wip/* branches in step 2).
-    let carried = recreate_linked_worktrees(&migrating, &worktrees, &materialized, &mut used_dirs)?;
+    let carried = recreate_linked_worktrees(&migrating, &worktrees, &materialized)?;
     let carried_names: Vec<String> = carried
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -739,36 +747,41 @@ fn origin_default_branch(container: &Path, fallback: Option<&str>, ssh: Option<&
 }
 
 /// Add the default-branch worktree, handling a default that exists only as a
-/// remote-tracking ref (the flat repo may have deleted its local default).
+/// remote-tracking ref (the flat repo may have deleted its local default). Both
+/// arms route through the shared `common::bare` primitive with `ReuseOrBail`,
+/// which derives the dir as `slugify_branch(branch)` and reuses an
+/// already-checked-out branch (by branch, not by dir) for idempotency and
+/// legacy-raw-path compatibility.
 fn add_default_worktree(container: &Path, branch: &str) -> Result<PathBuf> {
-    if ref_exists(container, &format!("refs/heads/{}", branch)) {
-        bare::add_worktree(container, branch)
-    } else if ref_exists(container, &format!("refs/remotes/origin/{}", branch)) {
+    if bare::ref_exists(container, &format!("refs/heads/{}", branch)) {
+        add_worktree(container, branch, Source::ExistingLocal, Collision::ReuseOrBail)
+    } else if bare::ref_exists(container, &format!("refs/remotes/origin/{}", branch)) {
         let origin_ref = format!("origin/{}", branch);
-        git::run(
-            &["worktree", "add", "-b", branch, "--track", branch, &origin_ref],
-            Some(container),
-            None,
+        add_worktree(
+            container,
+            branch,
+            Source::RemoteTracking {
+                origin_ref: &origin_ref,
+            },
+            Collision::ReuseOrBail,
         )
-        .wrap_err_with(|| format!("git worktree add --track {} in {}", branch, container.display()))?;
-        Ok(container.join(branch))
     } else {
         bail!("default branch '{}' not found in the migrated repo", branch)
     }
 }
 
-/// Whether `refname` resolves in the container's git database.
-fn ref_exists(container: &Path, refname: &str) -> bool {
-    git::output(&["rev-parse", "--verify", "--quiet", refname], Some(container), None)
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// `git worktree add <dir> <branch>` keeping the real branch name.
-fn add_named_worktree(container: &Path, dir: &str, branch: &str) -> Result<PathBuf> {
-    git::run(&["worktree", "add", dir, branch], Some(container), None)
-        .wrap_err_with(|| format!("git worktree add {} {} in {}", dir, branch, container.display()))?;
-    Ok(container.join(dir))
+/// Add a worktree for `branch` via the shared `common::bare` primitive. The
+/// primitive derives the directory as `slugify_branch(branch)` and applies the
+/// collision policy itself, so migrate no longer tracks dir names by hand.
+fn add_worktree(container: &Path, branch: &str, source: Source<'_>, collision: Collision) -> Result<PathBuf> {
+    common::bare::add_worktree(
+        container,
+        &AddSpec {
+            branch,
+            source,
+            collision,
+        },
+    )
 }
 
 /// Recreate each previously-linked worktree (every entry after the main one) as
@@ -780,7 +793,6 @@ fn recreate_linked_worktrees(
     container: &Path,
     worktrees: &[Worktree],
     materialized: &HashSet<String>,
-    used_dirs: &mut HashSet<String>,
 ) -> Result<Vec<PathBuf>> {
     debug!(
         "recreate_linked_worktrees: container={:?} count={}",
@@ -791,8 +803,15 @@ fn recreate_linked_worktrees(
     for wt in worktrees.iter().skip(1) {
         match &wt.branch {
             Some(branch) if !materialized.contains(branch) => {
-                let dir = unique_dir(&git::slugify_branch(branch), used_dirs);
-                created.push(add_named_worktree(container, &dir, branch)?);
+                // `Uniquify`: the primitive derives `slugify_branch(branch)` and
+                // appends a numeric suffix (probed via `Path::exists()`) on a
+                // slug collision with an already-created worktree dir.
+                created.push(add_worktree(
+                    container,
+                    branch,
+                    Source::ExistingLocal,
+                    Collision::Uniquify,
+                )?);
             }
             Some(branch) => debug!("recreate_linked_worktrees: '{}' already materialized; skipping", branch),
             None => warn!(
@@ -802,19 +821,6 @@ fn recreate_linked_worktrees(
         }
     }
     Ok(created)
-}
-
-/// A collision-free worktree directory basename under the container.
-fn unique_dir(slug: &str, used: &mut HashSet<String>) -> String {
-    let base = if slug.is_empty() { "worktree".to_string() } else { slug.to_string() };
-    let mut dir = base.clone();
-    let mut n = 1;
-    while used.contains(&dir) {
-        dir = format!("{}-{}", base, n);
-        n += 1;
-    }
-    used.insert(dir.clone());
-    dir
 }
 
 /// Repair worktree admin files after the container rename, passing each

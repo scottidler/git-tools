@@ -121,6 +121,42 @@ fn test_reconcile_is_idempotent() {
     assert!(second.join("README.md").is_file());
 }
 
+/// Legacy-raw-path compatibility (Phase 3): a container created by OLD `clone`
+/// with a slashed branch has its worktree at the RAW nested path
+/// (`container/release/1.2`). After the slug-unification the tool derives
+/// `container/release-1-2`, but `add_worktree`'s `ReuseOrBail` must find the
+/// branch via `git worktree list` and reuse the existing RAW path - never attempt
+/// a second (fatal) `git worktree add` for an already-checked-out branch.
+#[test]
+fn test_add_worktree_reuses_legacy_raw_path() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    make_source(root, "org", "repo");
+
+    let config = fixture_config(root, "org", "repo");
+    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let container = root.join("work").join("org").join("repo");
+
+    // Mimic old clone: a branch checked out at the RAW slashed path.
+    git_run(&container, &["branch", "release/1.2"]);
+    let raw = container.join("release").join("1.2");
+    git_run(&container, &["worktree", "add", raw.to_str().unwrap(), "release/1.2"]);
+    assert!(raw.is_dir(), "raw legacy worktree should exist for the test");
+
+    // The new code derives `release-1-2`, but ReuseOrBail must locate the branch
+    // and reuse the existing raw path rather than double-checking-out.
+    let reused = add_worktree(&container, "release/1.2").unwrap();
+    assert_eq!(
+        reused.canonicalize().unwrap(),
+        raw.canonicalize().unwrap(),
+        "must reuse the legacy raw worktree path, not the derived slug dir"
+    );
+    assert!(
+        !container.join("release-1-2").exists(),
+        "no second worktree should be created at the derived slug dir"
+    );
+}
+
 /// Security-relevant invariant: a worktree placed under `~/repos/tatari-tv/`
 /// resolves to the work identity via gitconfig `includeIf "gitdir:"`. Locks the
 /// persona property so a refactor can't silently break it.

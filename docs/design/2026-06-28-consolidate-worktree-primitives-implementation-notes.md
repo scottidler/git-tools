@@ -94,3 +94,67 @@ None.
 
 ### Open questions
 - None.
+
+## Phase 3: Rewire `clone` (the behavior-changing phase)
+
+### Design decisions
+- `clone/src/bare.rs::add_worktree` now delegates to `common::bare::add_worktree`
+  with `Source::ExistingLocal` + `Collision::ReuseOrBail`. The public signature
+  (`(container, branch) -> Result<PathBuf>`) is unchanged so `ensure_default_worktree`
+  and the migrate default arm keep calling it as before.
+- `clone/src/bare.rs::ensure_default_worktree` had a pre-check on
+  `container.join(&branch).is_dir()` that returned early before the worktree-add.
+  DELETED that pre-check so the default-worktree path now flows entirely through
+  the primitive's `ReuseOrBail`. This is requirement #4: the pre-check on the RAW
+  branch dir would bypass the by-branch reuse and reintroduce the raw-path/slug-path
+  split. Idempotency is preserved because `ReuseOrBail` locates an already-checked-out
+  default via `git worktree list` and returns its path.
+- `clone/src/migrate.rs::add_default_worktree` keeps its existing 3-arm dispatch
+  (local / remote-tracking / bail) but both add-arms now route through a small local
+  `add_worktree(container, branch, source, collision)` wrapper over
+  `common::bare::add_worktree`, with `ReuseOrBail`. The `RemoteTracking { origin_ref }`
+  arm replaces the hand-rolled `git worktree add -b --track` (the drift the doc called
+  out, which joined the dir on the RAW branch name).
+- Both `add_named_worktree` call sites use `Collision::Uniquify`:
+  `clone/src/migrate.rs::migrate_flat_to_bare` (the current-branch site, formerly
+  `:174`) and `clone/src/migrate.rs::recreate_linked_worktrees` (linked worktrees,
+  formerly `:795`). Verified against the code: both were wrapped in the local
+  `unique_dir` today, and `:174` MUST be `Uniquify` (not `ReuseOrBail`) because the
+  current branch's slug can collide with the default dir and `ReuseOrBail` would bail
+  fatally there.
+- `clone/src/migrate.rs::ref_exists` (the local copy) is replaced by
+  `bare::ref_exists` (re-exported from `common::bare` via `clone/src/bare.rs`).
+  Phase 4 owns the broader `ref_exists` cleanup, but `add_default_worktree` needed a
+  ref check and the `common::bare::ref_exists` primitive already exists from Phase 1,
+  so the local copy was deleted here rather than left dead.
+
+### Deviations
+- Slug-unification (the deliberate behavior change): every clone-created worktree dir
+  is now `slugify_branch(branch)`, derived inside the primitive. In practice only the
+  DEFAULT worktree dir moves, and only when the default branch contains a slash/space
+  (`main`/`master` slug to themselves). migrate's current-branch and linked sites
+  already slugified, so their observable dirs are unchanged. Cited:
+  `clone/src/bare.rs::add_worktree` and `clone/src/migrate.rs::add_default_worktree`.
+- Removed the obsolete `used_dirs: HashSet` (seeded with the raw unslugified default,
+  formerly `migrate.rs:160-161`) and the local `unique_dir` helper (formerly
+  `migrate.rs:808`). The `Path::exists()`-probed suffixing now lives inside the
+  primitive's `Collision::Uniquify` (`common::bare::unique_dir`), so the by-hand
+  dir-name set in `clone/src/migrate.rs::migrate_flat_to_bare` and the
+  `used_dirs: &mut HashSet` parameter on `recreate_linked_worktrees` were both
+  dropped. The `materialized` branch set (the double-checkout guard) is KEPT.
+- No existing test assertion was changed. `main`/`feature`/`side` slug to themselves,
+  so `container.join("main")`, `flat.join("feature")`, `container.join("side")`, etc.
+  all stayed green. `test_persona_invariant_under_org_prefix` stays green unchanged.
+
+### Tradeoffs
+- Kept `clone/src/bare.rs::add_worktree` as a thin `(container, branch)` wrapper rather
+  than rewriting every caller to build an `AddSpec` inline. It is called from two
+  places with identical (ExistingLocal, ReuseOrBail) intent, so the wrapper reads
+  cleaner and keeps the migrate default arm's call site small.
+- The migrate local `add_worktree(container, branch, source, collision)` wrapper takes
+  `source`/`collision` explicitly rather than exposing the full `AddSpec` at each call
+  site; it keeps the three migrate call sites short while still routing through the
+  single primitive.
+
+### Open questions
+- None.

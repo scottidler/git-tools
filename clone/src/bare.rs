@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use common::bare::{AddSpec, Collision, Source};
 use common::git::{self, RepoSpec};
 use eyre::{Result, WrapErr};
 use log::{debug, warn};
@@ -19,7 +20,7 @@ use crate::transport;
 // Bare-container primitives shared with `worktree` live in `common::bare`; a
 // bare container also carries a `.git` pointer file, so callers must check
 // `is_bare_container` before treating a `.git` as a flat checkout.
-pub use common::bare::{default_branch, is_bare_container};
+pub use common::bare::{default_branch, is_bare_container, ref_exists};
 
 /// Set up a fresh bare container for `spec`, returning the canonical
 /// default-branch worktree path the wrapper `cd`s into (or the container itself
@@ -106,11 +107,12 @@ fn ensure_default_worktree(config: &Config, container: &Path) -> Result<PathBuf>
     }
 
     let branch = default_branch(container, config.default_branch.as_deref())?;
-    let worktree = container.join(&branch);
-    if worktree.is_dir() {
-        debug!("ensure_default_worktree: '{}' already present", worktree.display());
-        return Ok(worktree);
-    }
+    // Flow through the shared primitive with `ReuseOrBail`: it locates an
+    // already-checked-out default by BRANCH (via `git worktree list`), so a
+    // re-run is idempotent and a legacy container whose worktree sits at the
+    // pre-slug raw path is reused rather than double-checked-out. We must NOT
+    // pre-check `container.join(branch)` here: that would bypass the primitive's
+    // by-branch reuse and reintroduce the raw-path/slug-path split.
     add_worktree(container, &branch)
 }
 
@@ -122,14 +124,22 @@ fn has_commits(container: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Add a worktree for an existing local branch, checking it out into a
-/// directory of the same name under the container. Returns the worktree path.
+/// Add a worktree for an existing local branch via the shared `common::bare`
+/// primitive. The directory is derived as `slugify_branch(branch)` (so a slashed
+/// default lands at a safe slug dir, matching the `worktree` tool), and
+/// `ReuseOrBail` makes the add idempotent / legacy-raw-path compatible by
+/// locating the branch via `git worktree list` rather than the derived dir.
+/// Returns the worktree path.
 pub fn add_worktree(container: &Path, branch: &str) -> Result<PathBuf> {
     debug!("add_worktree: container={:?} branch={}", container, branch);
-    let worktree = container.join(branch);
-    git::run(&["worktree", "add", branch, branch], Some(container), None)
-        .wrap_err_with(|| format!("git worktree add {} in {:?}", branch, container.display()))?;
-    Ok(worktree)
+    common::bare::add_worktree(
+        container,
+        &AddSpec {
+            branch,
+            source: Source::ExistingLocal,
+            collision: Collision::ReuseOrBail,
+        },
+    )
 }
 
 #[cfg(test)]
