@@ -40,7 +40,7 @@ pub fn prune(container: &Path, default_branch: Option<&str>, assume_yes: bool) -
 
     let default = bare::default_branch(container, default_branch)?;
     let origin_default = format!("origin/{}", default);
-    if !ref_exists(container, &format!("refs/remotes/{}", origin_default)) {
+    if !bare::ref_exists(container, &format!("refs/remotes/{}", origin_default)) {
         bail!(
             "no '{}' ref to compare against; fetch first so prune can tell what is merged",
             origin_default
@@ -120,13 +120,6 @@ pub fn prune(container: &Path, default_branch: Option<&str>, assume_yes: bool) -
     let _ = git::run(&["worktree", "prune"], Some(container), None);
 
     Ok(removed)
-}
-
-/// Whether `<refname>` resolves in the container's git database.
-fn ref_exists(container: &Path, refname: &str) -> bool {
-    git::output(&["rev-parse", "--verify", "--quiet", refname], Some(container), None)
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Whether the current directory is inside `worktree` (so we must not remove it).

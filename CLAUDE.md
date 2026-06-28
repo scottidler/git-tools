@@ -175,6 +175,10 @@ thin `main.rs` + testable `lib.rs`.
 - `repo::RepoDiscovery` - find repos under paths (`with_max_depth`, `with_per_worktree`), bare-container aware
 - `language::detect_language(path) -> Option<String>` - three-stage detection (markers, extensions, fallback)
 - `parallel::ParallelExecutor` - rayon-based parallel repo processing
+- `bare::is_bare_container(path)` / `bare::default_branch(container, fallback)` - container detection and default-branch resolution
+- `bare::ref_exists(container, refname) -> bool` - single home for the ref-existence check (used by `clone`, `worktree`, and `prune`; no copies elsewhere)
+- `bare::add_worktree(container, &AddSpec) -> Result<PathBuf>` - the guarded `git worktree add` primitive shared by `clone` and `worktree`; derives the directory from `slugify_branch(branch)`, applies `Collision::ReuseOrBail` (idempotent re-switch) or `Collision::Uniquify` (batch recreation with numeric suffix)
+- `bare::resolve_and_add(container, raw_branch, default_branch) -> Result<PathBuf>` - ref-probing layer used by the `worktree` tool: classifies a raw branch string as local / remote-only / new and calls `add_worktree` with `Collision::ReuseOrBail`; `clone`'s call sites (which already know the source tuple) call `add_worktree` directly
 
 ## Design Docs
 

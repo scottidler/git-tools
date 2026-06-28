@@ -158,3 +158,38 @@ None.
 
 ### Open questions
 - None.
+
+## Phase 4: Cleanup + docs
+
+### Design decisions
+- Rewired `worktree/src/prune.rs`'s local `ref_exists` (formerly at line 126) to call
+  `bare::ref_exists(container, refname)` directly - `worktree/src/prune.rs::prune`. The
+  local private function was deleted. The `use common::{bare, git};` import was already
+  present so no new import was needed.
+- Confirmed `common::bare::ref_exists` is now the sole definition in the workspace. The
+  copies in `switch.rs` and `migrate.rs` were removed in Phases 2-3 respectively; prune's
+  copy is removed here.
+- `Command::new("git")` appears exactly once in the workspace: `common/src/git/run.rs`,
+  which is the implementation of the `common::git::run`/`output` runners themselves.
+  No production code outside that file hand-rolls a git command - the rule is satisfied.
+- Updated `CLAUDE.md` "Common Crate Modules" section to document the full `common::bare`
+  surface: `bare::is_bare_container`/`bare::default_branch` (existing), `bare::ref_exists`
+  (the single home for the check), `bare::add_worktree(container, &AddSpec)` with
+  `Source`/`Collision` (the guarded primitive shared by `clone` and `worktree`), and
+  `bare::resolve_and_add` (the ref-probing layer used by the `worktree` tool). The
+  description makes explicit that `clone`'s call sites call `add_worktree` directly while
+  `worktree` goes through `resolve_and_add`, so the doc no longer implies the logic is
+  forked.
+- Design doc status flipped from `In Review` to `Implemented`.
+
+### Deviations
+- None. The phase spec was followed exactly: rewire prune's `ref_exists`, grep for stray
+  `Command::new("git")` (none found outside the runner), update CLAUDE.md, green CI.
+
+### Tradeoffs
+- Deleted the local `ref_exists` from `prune.rs` rather than leaving it as an alias for
+  `bare::ref_exists`. Keeping a local alias would be dead weight; one call site, one
+  function is simpler.
+
+### Open questions
+- None.
