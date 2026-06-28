@@ -1,14 +1,14 @@
-// common — bare-container primitives shared by `clone` and `worktree`.
+// common - bare-container primitives shared by `clone` and `worktree`.
 //
 // A bare container is `~/repos/<org>/<repo>/` holding `.bare/` (the git
 // database), a `.git` pointer file, and one worktree directory per checked-out
 // branch. These read-and-occasionally-mutate primitives are shared so the two
 // binaries can't drift (notably `default_branch`, which mutates via
-// `git remote set-head`).
+// `git remote set-head`, and `add_worktree`, the single guarded worktree-add).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use eyre::{Result, eyre};
+use eyre::{Result, WrapErr, bail, eyre};
 use log::{debug, warn};
 
 use crate::git;
@@ -59,3 +59,236 @@ fn symbolic_ref_short(container: &Path, refname: &str) -> Option<String> {
     let branch = out.stdout.trim().trim_start_matches("origin/").to_string();
     if branch.is_empty() { None } else { Some(branch) }
 }
+
+/// Whether `refname` resolves in the container's git database. The single home
+/// for the check that used to be copy-pasted across `switch`, `migrate`, and
+/// `prune`.
+pub fn ref_exists(container: &Path, refname: &str) -> bool {
+    debug!("ref_exists: container={:?} refname={}", container, refname);
+    git::output(&["rev-parse", "--verify", "--quiet", refname], Some(container), None)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Where a new worktree's content comes from.
+pub enum Source<'a> {
+    /// Check out an existing local branch as-is: `worktree add <dir> <branch>`.
+    ExistingLocal,
+    /// Create a local tracking branch from a remote ref:
+    /// `worktree add -b <branch> --track <dir> <origin_ref>`.
+    RemoteTracking { origin_ref: &'a str },
+    /// Create a brand-new branch based on `base`:
+    /// `worktree add -b <branch> <dir> <base>`.
+    NewFrom { base: &'a str },
+}
+
+/// What to do when `branch` is already checked out, or the derived dir is taken.
+pub enum Collision {
+    /// Idempotent reuse: if `git worktree list` already has `branch` checked out
+    /// anywhere, return that existing path (this is what makes a re-switch a no-op
+    /// AND what keeps a legacy container whose worktree sits at a pre-slug raw
+    /// path from triggering a fatal double-checkout). Otherwise, if the derived
+    /// dir is occupied by an unrelated tree, bail. (interactive single-add -
+    /// `worktree <branch>`)
+    ReuseOrBail,
+    /// Append a numeric suffix (`-1`, `-2`, …) until the dir is free, probed via
+    /// `Path::exists()`. (batch recreation - `clone --migrate` linked worktrees)
+    Uniquify,
+}
+
+/// A fully-resolved worktree-add request. The worktree directory is NOT a field:
+/// the primitive always derives it as `slugify_branch(branch)`, then applies the
+/// collision policy (which may append a suffix). Making the dir
+/// underivable-by-the-caller is what keeps `clone` and `worktree` from drifting.
+pub struct AddSpec<'a> {
+    /// The branch the worktree hosts. For `ExistingLocal`/`RemoteTracking` this is
+    /// the real branch name (e.g. `feature/auth`); for `NewFrom` it is the slug
+    /// that also names the new branch (e.g. `new-feature`).
+    pub branch: &'a str,
+    pub source: Source<'a>,
+    pub collision: Collision,
+}
+
+/// The guarded worktree-add primitive: one `git worktree add`, honoring the
+/// collision policy. The directory is derived as `slugify_branch(spec.branch)`.
+/// Returns the absolute path to the worktree (`container.join(final_dir)`),
+/// including any `Uniquify` suffix.
+pub fn add_worktree(container: &Path, spec: &AddSpec) -> Result<PathBuf> {
+    debug!("add_worktree: container={:?} branch={}", container, spec.branch);
+
+    let slug = git::slugify_branch(spec.branch);
+    if slug.is_empty() {
+        bail!(
+            "branch name '{}' slugifies to empty; choose a name with alphanumerics",
+            spec.branch
+        );
+    }
+
+    let dir = match spec.collision {
+        Collision::ReuseOrBail => {
+            // Idempotent reuse / legacy-raw-path compatibility: if the branch is
+            // already checked out ANYWHERE (by branch, not by derived dir), reuse
+            // that existing path rather than attempting a second checkout (git
+            // rejects an already-checked-out branch fatally).
+            if let Some(existing) = worktree_path_for_branch(container, spec.branch)? {
+                debug!(
+                    "add_worktree: branch '{}' already checked out at {}; reusing",
+                    spec.branch,
+                    existing.display()
+                );
+                return Ok(existing);
+            }
+            // Branch is not checked out anywhere. If the derived dir is occupied by
+            // an unrelated tree, bail rather than collide.
+            let worktree = container.join(&slug);
+            if worktree.exists() {
+                bail!(
+                    "'{}' already exists but does not host branch '{}' (slug collision); \
+                     refusing to reuse it",
+                    worktree.display(),
+                    spec.branch
+                );
+            }
+            slug
+        }
+        Collision::Uniquify => unique_dir(container, &slug),
+    };
+
+    let worktree = container.join(&dir);
+    let add_args = build_add_args(&dir, spec);
+    let arg_refs: Vec<&str> = add_args.iter().map(String::as_str).collect();
+    git::run(&arg_refs, Some(container), None)
+        .wrap_err_with(|| format!("git {:?} in {}", arg_refs, container.display()))?;
+    Ok(worktree)
+}
+
+/// Build the `git worktree add` argument vector for `spec` targeting `dir`.
+fn build_add_args(dir: &str, spec: &AddSpec) -> Vec<String> {
+    match &spec.source {
+        Source::ExistingLocal => vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            dir.to_string(),
+            spec.branch.to_string(),
+        ],
+        Source::RemoteTracking { origin_ref } => vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            spec.branch.to_string(),
+            "--track".to_string(),
+            dir.to_string(),
+            origin_ref.to_string(),
+        ],
+        Source::NewFrom { base } => vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            spec.branch.to_string(),
+            dir.to_string(),
+            base.to_string(),
+        ],
+    }
+}
+
+/// Probe `<base>`, `<base>-1`, `<base>-2`, … until a leaf dir in `container` is
+/// free (via `Path::exists()`), returning the free leaf name.
+fn unique_dir(container: &Path, base: &str) -> String {
+    if !container.join(base).exists() {
+        return base.to_string();
+    }
+    let mut n = 1;
+    loop {
+        let candidate = format!("{}-{}", base, n);
+        if !container.join(&candidate).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// The path of the worktree currently hosting `branch`, found via
+/// `git worktree list --porcelain` (by branch, not by derived dir), or `None`.
+fn worktree_path_for_branch(container: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let out = git::output(&["worktree", "list", "--porcelain"], Some(container), None)?;
+    if !out.status.success() {
+        bail!(
+            "git worktree list failed in {}: {}",
+            container.display(),
+            out.stderr.trim()
+        );
+    }
+    let target = format!("refs/heads/{}", branch);
+    let mut cur_path: Option<PathBuf> = None;
+    for line in out.stdout.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            cur_path = Some(PathBuf::from(rest));
+        } else if let Some(refname) = line.strip_prefix("branch ")
+            && refname == target
+            && let Some(path) = cur_path.clone()
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+/// Ref-probing convenience for the `worktree` tool: take a raw branch string,
+/// classify it (local / remote-only / new), and add with `Collision::ReuseOrBail`.
+/// This is the relocated `switch` body.
+pub fn resolve_and_add(container: &Path, raw_branch: &str, default_branch: Option<&str>) -> Result<PathBuf> {
+    debug!(
+        "resolve_and_add: container={:?} raw_branch={} default_branch={:?}",
+        container, raw_branch, default_branch
+    );
+
+    // 1. Existing local branch → check it out as-is (real name; slugified dir).
+    if ref_exists(container, &format!("refs/heads/{}", raw_branch)) {
+        return add_worktree(
+            container,
+            &AddSpec {
+                branch: raw_branch,
+                source: Source::ExistingLocal,
+                collision: Collision::ReuseOrBail,
+            },
+        );
+    }
+
+    // 2. Existing remote-only branch → create a tracking local branch (real name;
+    //    slugified dir).
+    if ref_exists(container, &format!("refs/remotes/origin/{}", raw_branch)) {
+        let origin_ref = format!("origin/{}", raw_branch);
+        return add_worktree(
+            container,
+            &AddSpec {
+                branch: raw_branch,
+                source: Source::RemoteTracking {
+                    origin_ref: &origin_ref,
+                },
+                collision: Collision::ReuseOrBail,
+            },
+        );
+    }
+
+    // 3. New branch → slugify; the slug names both the branch and the dir, based
+    //    on the default branch.
+    let slug = git::slugify_branch(raw_branch);
+    if slug.is_empty() {
+        bail!(
+            "branch name '{}' slugifies to empty; choose a name with alphanumerics",
+            raw_branch
+        );
+    }
+    let base = self::default_branch(container, default_branch)?;
+    add_worktree(
+        container,
+        &AddSpec {
+            branch: &slug,
+            source: Source::NewFrom { base: &base },
+            collision: Collision::ReuseOrBail,
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests;
