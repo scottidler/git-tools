@@ -44,13 +44,19 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           rustup target add ${{ matrix.target }}
 
-      - name: Build and package all subprojects
+      - name: Build and package all binary crates
         run: |
           mkdir -p artifacts/
-          for project in clone reposlug ls-git-repos ls-github-repos ls-owners ls-stale-branches ls-stale-prs; do
-            echo "Building $project..."
-            cargo build --release --manifest-path "$project/Cargo.toml" --target ${{ matrix.target }}
-            cp target/${{ matrix.target }}/release/$project artifacts/
+          cargo build --release --workspace --bins --target ${{ matrix.target }}
+          # Enumerate every workspace binary target (skips lib-only crates like
+          # `common`) so a newly added tool is released automatically instead of
+          # being silently dropped -- a hardcoded list omitted `worktree` from the
+          # v0.2.13 tarball. Mirrors how `otto install` loops over the workspace.
+          bins=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' | sort -u)
+          for bin in $bins; do
+            echo "Packaging $bin..."
+            cp "target/${{ matrix.target }}/release/$bin" artifacts/
           done
           # Include shell-functions.sh in the artifacts
           cp shell-functions.sh artifacts/

@@ -9,10 +9,10 @@ CLONE=$(print -r -- =clone)
 
 clone() {
     if [[ "$1" == (-h|--help|-v|--version) ]]; then
-        eval $CLONE "$@"
+        "$CLONE" "$@"
     else
         local dest
-        dest=$(eval $CLONE "$@") || return $?
+        dest=$("$CLONE" "$@") || return $?
         if [[ -z "$dest" || ! -d "$dest" ]]; then
             print -u2 -- "clone: no valid destination returned; staying in $PWD"
             return 1
@@ -33,11 +33,11 @@ WORKTREE=$(print -r -- =worktree)
 worktree() {
     case "$1" in
         -*)
-            eval $WORKTREE "$@"
+            "$WORKTREE" "$@"
             ;;
         *)
             local dest
-            dest=$(eval $WORKTREE "$@") || return $?
+            dest=$("$WORKTREE" "$@") || return $?
             if [[ -z "$dest" || ! -d "$dest" ]]; then
                 print -u2 -- "worktree: no valid destination returned; staying in $PWD"
                 return 1

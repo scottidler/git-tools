@@ -57,8 +57,15 @@ chmod +x "$stubbin/clone"
 
 # A stub `worktree` on PATH, driven the same way. shell-functions.sh captures
 # `=worktree` at source time, so this must exist before the source below.
+# When $STUB_ARGV_FILE is set it records argc on the first line and one arg per
+# line after, so a test can prove the wrapper forwards args without re-splitting
+# (the eval word-split bug: `worktree "New Feature"` must arrive as ONE arg).
 cat > "$stubbin/worktree" <<'STUB'
 #!/usr/bin/env zsh
+if [[ -n "$STUB_ARGV_FILE" ]]; then
+    print -r -- "$#" > "$STUB_ARGV_FILE"
+    for a in "$@"; do print -r -- "$a" >> "$STUB_ARGV_FILE"; done
+fi
 [[ -n "$STUB_OUT" ]] && print -r -- "$STUB_OUT"
 exit ${STUB_RC:-0}
 STUB
@@ -150,6 +157,14 @@ check "worktree --list -> passthrough, no cd" "$home" "$PWD"
 builtin cd "$home"
 STUB_OUT=$dest STUB_RC=0 worktree --help >/dev/null 2>&1
 check "worktree --flag -> passthrough, no cd" "$home" "$PWD"
+
+# A branch name with a space must reach the binary as a SINGLE arg, not two
+# (regression: `eval $WORKTREE "$@"` word-split "New Feature" into New + Feature).
+builtin cd "$home"
+argv_file=$root/worktree.argv
+STUB_OUT=$dest STUB_RC=0 STUB_ARGV_FILE=$argv_file worktree "New Feature"
+check "worktree 'New Feature' -> binary got 1 arg"        "1"           "$(sed -n 1p "$argv_file")"
+check "worktree 'New Feature' -> arg preserved verbatim"  "New Feature" "$(sed -n 2p "$argv_file")"
 
 # --- result ------------------------------------------------------------------
 if (( fails )); then

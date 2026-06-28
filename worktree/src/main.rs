@@ -24,14 +24,25 @@ fn main() -> Result<()> {
 }
 
 /// Print the worktree table to stdout, one branch per line, skipping the bare
-/// container entry (it has no working tree to `cd` into).
+/// container entry (it has no working tree to `cd` into). The branch column is
+/// padded to the widest branch name so the path column stays aligned even when a
+/// branch name is longer than any fixed width would allow.
 fn print_entries(entries: &[worktree::Entry]) {
+    let label = |entry: &worktree::Entry| entry.branch.clone().unwrap_or_else(|| "(detached)".into());
+
+    let width = entries
+        .iter()
+        .filter(|entry| !entry.bare)
+        .map(|entry| label(entry).chars().count())
+        .max()
+        .unwrap_or(0);
+
     for entry in entries {
         if entry.bare {
             continue;
         }
-        let branch = entry.branch.as_deref().unwrap_or("(detached)");
+        let branch = label(entry);
         let lock = if entry.locked { " [locked]" } else { "" };
-        println!("{:<28} {}{}", branch, entry.path.display(), lock);
+        println!("{:<width$} {}{}", branch, entry.path.display(), lock, width = width);
     }
 }
