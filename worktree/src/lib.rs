@@ -12,6 +12,7 @@ pub mod config;
 pub mod list;
 pub mod pick;
 pub mod prune;
+pub mod shell;
 pub mod switch;
 
 pub use cli::Cli;

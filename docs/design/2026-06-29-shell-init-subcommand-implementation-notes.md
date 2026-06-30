@@ -41,3 +41,27 @@
 ### Open questions
 
 - None.
+
+## Phase 3: worktree emitter + pre-dispatch
+
+### Design decisions
+
+- `const ZSH: &str = concat!(...)` reuses the same `env!("GIT_DESCRIBE")` mechanism from the worktree crate's existing `build.rs` - no new build infrastructure was added -- `worktree/src/shell.rs:ZSH`.
+- The emitted `worktree()` function uses a `case "$1" in` dispatch with `-*|shell-init)` for the passthrough branch and `*)` for the stdout-capture + cd branch - this exactly matches the design doc's "Emitted worktree() (zsh)" section, which differs structurally from `clone()`'s `if/else` form because worktree's flags (`--list`, `--prune`) must also pass through without triggering the capture path.
+- Pre-dispatch in `main.rs` inserted before `Cli::parse()`, identical shape to clone's: inspect `std::env::args().skip(1)`, check for `"shell-init"`, emit and return -- `worktree/src/main.rs:main`. The positional/flag path below is byte-for-byte unchanged.
+- `pub mod shell;` registered in `worktree/src/lib.rs` in alphabetical order between `prune` and `switch` -- `worktree/src/lib.rs`.
+- Tests placed in `worktree/src/shell/tests.rs` with `#[cfg(test)] mod tests;` declared at the bottom of `shell.rs`, mirroring the Phase 2 pattern exactly.
+- Added an explicit `zsh_script_has_flag_and_shell_init_passthrough_case` test asserting `-*|shell-init)` is present in the script body - this is the Phase 3 addition called out in the spec ("plus assert `-*|shell-init)` passthrough").
+
+### Deviations
+
+- None.
+
+### Tradeoffs
+
+- `case "$1" in` dispatch vs `if/else` form (clone's approach) - worktree uses `case` because it must simultaneously passthrough both flags (`-*`) and the `shell-init` literal; a combined `[[ "$1" == (-*|shell-init) ]]` zsh pattern would also work but the `case` form is what the design doc specifies and is more readable when the pattern set grows.
+- Alphabetical ordering of `pub mod shell;` in `lib.rs` (between `prune` and `switch`) vs appending at the end - alphabetical ordering matches the existing style in `lib.rs` and keeps diffs minimal.
+
+### Open questions
+
+- None.
