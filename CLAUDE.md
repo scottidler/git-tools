@@ -40,30 +40,51 @@ supported way to install the whole workspace locally.
 - Releasing is done with `/shipit`: commit → `bump` (patch by default; `0.x.y` synchronized
   across all crates) → push `main` + annotated `vX.Y.Z` tag → `otto install`. The `v*` tag
   triggers `.github/workflows/binary-release.yml` to build the x86_64 Linux release tarball.
-- `~/bin/clone` is a symlink to `~/.cargo/bin/clone`; the shell function below calls `~/bin/clone`.
+### 2. Shell functions `clone` / `worktree` → `<bin> shell-init zsh`
 
-### 2. Shell function `clone` → `shell-functions.sh`
+The `clone` and `worktree` shell functions are NOT static files and NOT a binary — each
+**binary emits its own wrapper function** via a `<bin> shell-init <shell>` subcommand
+(`zsh` today; the emitter is structured so `bash`/`fish` can be added later). The function
+wraps the binary and `cd`s the parent shell into the printed path. Install is one guarded
+`eval` line per tool in your `.zshrc` (matching the house `qai`/`aka` pattern):
 
-`shell-functions.sh` (repo root) defines the `clone` shell function. It is NOT a binary — it
-wraps the `clone` binary and `cd`s into the freshly cloned path. Wrapper contract (do not break it):
+```zsh
+if hash clone    2>/dev/null; then eval "$(command clone    shell-init zsh)"; fi
+if hash worktree 2>/dev/null; then eval "$(command worktree shell-init zsh)"; fi
+```
 
-- The `clone` **binary** prints the destination path to **stdout**, all errors to **stderr**,
-  and exits non-zero on failure.
-- The **function** captures stdout, bails on the binary's non-zero exit *before* any `cd`, and
-  guards against empty/non-directory output. This is what keeps a failed clone from silently
-  `cd`-ing you to `$HOME` (the bug fixed in v0.2.5). If you ever make the binary print
-  diagnostics to stdout, you reintroduce that bug.
+`command <bin>` is load-bearing: it runs the on-PATH binary even if a same-named function
+is already defined, so the `eval` always *redefines* the function with the freshly emitted
+body (the cutover-ordering fix). The `hash` guard degrades gracefully when the binary isn't
+installed. The header comment in the emitted body carries the binary's `GIT_DESCRIBE`, so a
+stale function in a long-running shell is diagnosable against `<bin> --version`.
 
-Live wiring: `~/.shell-functions.d/git-tools.sh` → this repo's `shell-functions.sh`, sourced by
-`~/.shell-functions` on shell startup.
+Wrapper contract (do not break it — design: `docs/design/2026-06-29-shell-init-subcommand.md`):
+
+- The **binary** prints the destination path to **stdout**, all errors to **stderr**, and
+  exits non-zero on failure.
+- The **function** captures stdout, bails on the binary's non-zero exit *before* any `cd`,
+  and guards against empty/non-directory output. This is what keeps a failed clone from
+  silently `cd`-ing you to `$HOME` (the bug fixed in v0.2.5). If you ever make the binary
+  print diagnostics to stdout, you reintroduce that bug.
+- `<bin> shell-init` and `-h/--help/-v/--version` pass straight through the function (no
+  stdout capture, no `cd`) — so re-emitting interactively after the function is loaded
+  prints the script instead of being swallowed.
+
+The function source of truth lives in the binaries: `clone/src/shell.rs` and
+`worktree/src/shell.rs` (shared rejection error in `common/src/shell.rs`). The contract is
+locked by `tests/shell-functions.zsh` (the `shell-test` otto task), which `eval`s the
+*emitted* functions and exercises the prints-path / does-the-`cd` / failed-clone guard.
 
 ### 3. Reproducible wiring → the `manifest` CLI
 
-The symlinks (`~/.cargo/bin` installs and `~/.shell-functions.d/*` links) are owned by the
-`manifest` CLI reading `scottidler/dotfiles/manifest.yml` — NOT by anything in this repo. The
-`scottidler/git-tools` block lists the `cargo:` crates to install and the `link:` entries
-(e.g. `shell-functions.sh: ~/.shell-functions.d/git-tools.sh`). To change what gets installed or
-linked, edit `manifest.yml` and run `manifest`; do not hand-edit the symlinks.
+The binary installs (`~/.cargo/bin`) are owned by the `manifest` CLI reading
+`scottidler/dotfiles/manifest.yml` — NOT by anything in this repo. The `scottidler/git-tools`
+block lists the `cargo:` crates to install. The wrapper functions are NOT a `manifest`
+symlink anymore: they come from the two `eval` lines in the dotfiles-tracked `.zshrc`. To
+change what gets installed, edit `manifest.yml` and run `manifest`; to change the wrapper
+delivery, edit `.zshrc` (the `eval` lines) — there is no longer a `~/.shell-functions.d/*`
+link to hand-edit.
 
 ### What NOT to do
 
@@ -71,8 +92,10 @@ linked, edit `manifest.yml` and run `manifest`; do not hand-edit the symlinks.
   holds the not-yet-ported helpers (`clone-lite`, `default-branch`, `git-objects`,
   `remote-origin-url`, `reponame`); any tool with a Rust twin here was removed from that repo.
   Don't re-add shell/Python reimplementations of workspace crates.
-- **Don't hand-edit `~/.shell-functions.d/*` or `~/bin/*` symlinks** as the fix — change
-  `dotfiles/manifest.yml` so the state is reproducible, then run `manifest`.
+- **Don't reintroduce a static `shell-functions.sh` or a `~/.shell-functions.d/*` symlink.**
+  The wrappers are binary-emitted (`<bin> shell-init zsh`) and installed via the `.zshrc`
+  `eval` lines; to change the install, edit `dotfiles/manifest.yml` (binaries) or the
+  dotfiles `.zshrc` (eval lines) and run `manifest` — never hand-edit live symlinks.
 - **Don't `cargo install --path .`** from a single crate dir expecting the whole workspace — use
   `otto install`.
 - **Don't print to stdout from the `clone` binary except the destination path** (see wrapper contract).
@@ -127,7 +150,8 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
   supported). Discovery (`common::RepoDiscovery`) recognizes both shapes.
 - **`clone.cfg` `[clone] default-layout = bare|flat`** sets the per-machine
   default (CLI `--flat` overrides it; built-in default is `bare`).
-- **No `cd` navigation magic** (`shell-functions.sh`): both wrappers use the
+- **No `cd` navigation magic** (the binary-emitted wrappers, see Install & Wiring):
+  both wrappers use the
   same contract - the binary prints a destination path to stdout, the shell
   function `cd`s into it. `clone()` does this on a fresh clone; `worktree()` does
   it for `worktree <branch>` (switch-or-create), while the no-arg list form and

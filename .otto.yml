@@ -32,9 +32,9 @@ tasks:
     bash: |
       cargo test --workspace --all-features
 
-  # Test the shell-functions.sh clone() wrapper contract
+  # Test the binary-emitted clone()/worktree() wrapper contract
   shell-test:
-    help: "Test the shell-functions.sh clone() wrapper contract"
+    help: "Test the binary-emitted clone()/worktree() wrapper contract"
     bash: |
       zsh tests/shell-functions.zsh
 

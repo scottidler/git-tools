@@ -65,3 +65,28 @@
 ### Open questions
 
 - None.
+
+## Phase 4: Retire the static wiring (repo-local cutover)
+
+### Design decisions
+
+- Contract test retargeted to the EMITTED functions -- `tests/shell-functions.zsh` now `eval`s `"$(<built-bin> shell-init zsh)"` for both `clone` and `worktree` (exactly as `.zshrc` will), instead of `source`ing a static `shell-functions.sh`. The emitted bodies call `command clone` / `command worktree` (resolved at call time), so the test drives the contract by placing stub `clone`/`worktree` binaries first on `$PATH`; `command <bin>` resolves to the stub. All prior contract assertions (success-cd, non-zero-bail, empty/non-dir guard, flag passthrough, `worktree` space-arg single-token) are preserved, plus two new ones: `shell-init` passes straight through both functions (no capture/cd), and the bodies use `command <bin>` while dropping the old `$CLONE`/`$WORKTREE` snapshot.
+- Binary location mirrors the build layout -- `find_bin` prefers `target/release/<name>`, falls back to `target/debug/<name>`. The CI `check`/`test` tasks compile the workspace before `shell-test` runs, so `target/debug` is present in CI.
+- `shell-test` otto task KEPT and still wired into the CI `before:` list; only its `help` text and the fixture's subject changed (static file -> emitted functions), per the spec.
+- Release tarball no longer ships the wrapper -- dropped `cp shell-functions.sh artifacts/` from `binary-release.yml`; the per-binary `cp` loop is untouched.
+- Static file deleted via `rkvr rmrf shell-functions.sh` (recoverable; archived to `/var/tmp/rmrf/2026-06-29-195232-000/`), never plain `rm`.
+- `CLAUDE.md` Install & Wiring section 2 rewritten around the one-line `eval` install (`if hash clone 2>/dev/null; then eval "$(command clone shell-init zsh)"; fi` + worktree equivalent), preserving the full wrapper-contract documentation (binary-prints-path to stdout / function-does-the-`cd` / errors to stderr / non-zero exit) and adding the `command`/`hash`/version-marker rationale. Section 3 (manifest) updated to state the wrappers are no longer a `manifest` symlink; the "What NOT to do" and "No `cd` navigation magic" references to `shell-functions.sh` were corrected.
+- Design doc `Status:` flipped to `Implemented` as part of this final-phase commit.
+
+### Deviations
+
+- Spec said assert "binary-prints-path / function-does-`cd` contract and the failed-clone guard"; the count-based sanity check (`grep -c 'command clone' == 1`) I first wrote failed because `command clone` legitimately appears twice in the emitted body (install-line comment + the actual call). Changed those two sanity checks to presence assertions (`grep -q`) and added `$CLONE`/`$WORKTREE`-absence assertions. This is a stronger, not weaker, check of the same property and the contract assertions themselves are unchanged.
+
+### Tradeoffs
+
+- Stub-on-PATH driving the `command <bin>` body vs a wrapper-rewrite to capture `$CLONE` -- the old test sourced a file that snapshotted `=clone`; the new body resolves `command clone` at call time. Putting a stub first on `$PATH` is the natural way to exercise call-time resolution and keeps the test honest about how the emitted function actually finds the binary.
+- Keeping the per-test sandbox + stub harness from the old test vs writing a fresh one -- reused the proven sandbox/stub/cleanup scaffolding (mktemp root, `rkvr rmrf` cleanup, env-driven `STUB_OUT`/`STUB_RC`/`STUB_ARGV_FILE`) so only the function-definition mechanism changed, minimizing risk in the contract coverage.
+
+### Open questions
+
+- The cross-repo / live-system cutover is deferred to orchestrator finalization (out of this repo-local, `otto ci`-gated phase): adding the two guarded `eval` lines to the dotfiles-tracked `~/.zshrc` near `qai`/`aka`, removing the `link:` entry and the installer `mv` from `~/repos/scottidler/dotfiles/manifest.yml`, and running `manifest` to apply the symlink removal + `.zshrc` update reproducibly. Activation on already-running shells requires opening a new shell.
