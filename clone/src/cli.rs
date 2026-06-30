@@ -10,6 +10,9 @@ use crate::REMOTE_URLS;
 #[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
+#[command(
+    after_help = "Shell integration: `clone shell-init zsh` prints a cd-wrapper function; install it with `eval \"$(command clone shell-init zsh)\"` in your .zshrc so clone cd's you into the new checkout."
+)]
 pub struct Cli {
     #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
     pub log_level: LevelFilter,

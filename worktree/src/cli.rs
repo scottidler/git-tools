@@ -10,6 +10,9 @@ use log::LevelFilter;
 )]
 #[command(version = env!("GIT_DESCRIBE"))]
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
+#[command(
+    after_help = "Shell integration: `worktree shell-init zsh` prints a cd-wrapper function; install it with `eval \"$(command worktree shell-init zsh)\"` in your .zshrc so worktree cd's you into the selected worktree."
+)]
 pub struct Cli {
     #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
     pub log_level: LevelFilter,
