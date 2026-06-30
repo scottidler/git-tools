@@ -4,6 +4,7 @@ pub mod bare;
 pub mod cli;
 pub mod config;
 pub mod migrate;
+pub mod shell;
 pub mod transport;
 
 pub use cli::Cli;
