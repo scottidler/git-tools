@@ -1,24 +1,51 @@
 #!/usr/bin/env zsh
-# Tests for the `clone` shell-function wrapper in ../shell-functions.sh.
+# Tests for the `clone` and `worktree` shell-function wrappers emitted by the
+# binaries themselves via `<bin> shell-init zsh`.
 #
-# Sources the REAL shell-functions.sh (not a copy, so the test can't drift from
-# the shipped wrapper) and exercises the wrapper contract that keeps a failed
-# clone from silently `cd`-ing you to $HOME (the bug fixed in v0.2.5):
+# There is no longer a static shell-functions.sh: each binary is the single
+# source of truth for its own wrapper. This test `eval`s the emitted functions
+# (exactly as `.zshrc` does) and exercises the wrapper contract that keeps a
+# failed clone from silently `cd`-ing you to $HOME (the bug fixed in v0.2.5):
 #
 #   * the binary prints the destination path to stdout, errors to stderr,
 #     and exits non-zero on failure;
 #   * the function captures stdout, bails on a non-zero exit BEFORE any `cd`,
 #     and guards against empty / non-directory output.
 #
+# The emitted body uses `command clone` / `command worktree`, which resolve the
+# on-PATH binary at call time. We exploit that here: a stub `clone`/`worktree`
+# placed first on PATH is what `command <bin>` resolves to, so the contract is
+# driven without the real binary or network.
+#
 # The bare-container `chpwd` navigation shim was removed (it intercepted every
-# `cd` and stranded you on the bare root); navigation now lives in a dedicated
+# `cd` and stranded you on the bare root); navigation now lives in the dedicated
 # worktree tool, not in this wrapper. There is nothing chpwd-related left to test.
 
 emulate -L zsh
-export DEBUG=          # shell-functions.sh probes $DEBUG at source time
 
 SCRIPT_DIR=${0:A:h}
-SHELL_FUNCS=$SCRIPT_DIR/../shell-functions.sh
+REPO_ROOT=${SCRIPT_DIR:h}
+
+# Locate the built binaries the same way the workspace builds them: prefer a
+# release build, fall back to debug. The CI `test`/`check` tasks compile the
+# workspace before `shell-test` runs, so target/debug exists.
+find_bin() {
+    local name=$1
+    local rel=$REPO_ROOT/target/release/$name
+    local dbg=$REPO_ROOT/target/debug/$name
+    if [[ -x "$rel" ]]; then
+        print -r -- "$rel"
+    elif [[ -x "$dbg" ]]; then
+        print -r -- "$dbg"
+    else
+        print -u2 -- "FATAL - could not find a built '$name' binary under target/{release,debug}"
+        print -u2 -- "         run 'cargo build -p clone -p worktree' first"
+        exit 1
+    fi
+}
+
+CLONE_BIN=$(find_bin clone)
+WORKTREE_BIN=$(find_bin worktree)
 
 fails=0
 check() {
@@ -41,26 +68,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A stub `clone` on PATH whose behavior we drive per-test via env vars:
+# Stub `clone`/`worktree` on PATH whose behavior we drive per-test via env vars:
 #   STUB_OUT  - what it prints to stdout (the "destination path")
 #   STUB_RC   - the exit code it returns
-# This lets us model success, failure, and malformed output without the real
-# binary or network.
+#   STUB_ARGV_FILE - if set, records argc on line 1 then one arg per line, so a
+#                    test can prove the wrapper forwards args without re-splitting
+#                    (the eval word-split bug: `worktree "New Feature"` must
+#                    arrive as ONE arg).
+# The emitted functions call `command clone` / `command worktree`, which resolve
+# these stubs because $stubbin is first on PATH.
 stubbin=$root/stubbin
 mkdir -p "$stubbin"
-cat > "$stubbin/clone" <<'STUB'
-#!/usr/bin/env zsh
-[[ -n "$STUB_OUT" ]] && print -r -- "$STUB_OUT"
-exit ${STUB_RC:-0}
-STUB
-chmod +x "$stubbin/clone"
-
-# A stub `worktree` on PATH, driven the same way. shell-functions.sh captures
-# `=worktree` at source time, so this must exist before the source below.
-# When $STUB_ARGV_FILE is set it records argc on the first line and one arg per
-# line after, so a test can prove the wrapper forwards args without re-splitting
-# (the eval word-split bug: `worktree "New Feature"` must arrive as ONE arg).
-cat > "$stubbin/worktree" <<'STUB'
+write_stub() {
+    cat > "$stubbin/$1" <<'STUB'
 #!/usr/bin/env zsh
 if [[ -n "$STUB_ARGV_FILE" ]]; then
     print -r -- "$#" > "$STUB_ARGV_FILE"
@@ -69,7 +89,10 @@ fi
 [[ -n "$STUB_OUT" ]] && print -r -- "$STUB_OUT"
 exit ${STUB_RC:-0}
 STUB
-chmod +x "$stubbin/worktree"
+    chmod +x "$stubbin/$1"
+}
+write_stub clone
+write_stub worktree
 export PATH=$stubbin:$PATH
 
 dest=$root/repos/org/repo/main
@@ -77,47 +100,61 @@ mkdir -p "$dest"
 home=$root/home          # a stand-in $HOME to prove we never land here on failure
 mkdir -p "$home"
 
-# --- source the shipped wrapper ----------------------------------------------
-source "$SHELL_FUNCS"
+# --- define the wrappers from the EMITTED scripts (exactly as .zshrc does) ----
+eval "$("$CLONE_BIN" shell-init zsh)"
+eval "$("$WORKTREE_BIN" shell-init zsh)"
 
-# --- scenarios ---------------------------------------------------------------
+# Sanity: the emitted bodies (not some stale static file) are what we loaded.
+# The body invokes the on-PATH binary via `command <bin>` (no `$CLONE`/`$WORKTREE`
+# env var snapshot, which is what the retired static file used).
+functions clone    | grep -q 'command clone';    check "clone() body uses 'command clone'"       "0" "$?"
+functions worktree | grep -q 'command worktree';  check "worktree() body uses 'command worktree'" "0" "$?"
+functions clone    | grep -q '\$CLONE';    check "clone() body drops the \$CLONE snapshot"        "1" "$?"
+functions worktree | grep -q '\$WORKTREE'; check "worktree() body drops the \$WORKTREE snapshot"  "1" "$?"
+
+# --- clone() scenarios -------------------------------------------------------
 
 # Success: binary prints a real dir, exits 0 -> wrapper cd's into it.
 builtin cd "$home"
 STUB_OUT=$dest STUB_RC=0 clone org/repo
-check "success -> cd into the printed destination" "$dest" "$PWD"
+check "clone success -> cd into the printed destination" "$dest" "$PWD"
 
 # Failure: binary exits non-zero -> wrapper bails BEFORE cd, stays put, non-zero.
 builtin cd "$home"
 STUB_OUT="$dest" STUB_RC=1 clone org/repo 2>/dev/null
 rc=$?
-check "binary non-zero -> wrapper returns non-zero" "1" "$rc"
-check "binary non-zero -> did NOT cd (stayed put)"  "$home" "$PWD"
+check "clone non-zero -> wrapper returns non-zero" "1" "$rc"
+check "clone non-zero -> did NOT cd (stayed put)"  "$home" "$PWD"
 
 # Empty stdout (even with rc 0) -> guarded, no cd, non-zero.
 builtin cd "$home"
 STUB_OUT="" STUB_RC=0 clone org/repo 2>/dev/null
 rc=$?
-check "empty stdout -> wrapper returns non-zero" "1" "$rc"
-check "empty stdout -> did NOT cd (stayed put)"  "$home" "$PWD"
+check "clone empty stdout -> wrapper returns non-zero" "1" "$rc"
+check "clone empty stdout -> did NOT cd (stayed put)"  "$home" "$PWD"
 
 # Non-directory stdout -> guarded, no cd, non-zero.
 builtin cd "$home"
 STUB_OUT="$root/does/not/exist" STUB_RC=0 clone org/repo 2>/dev/null
 rc=$?
-check "non-dir stdout -> wrapper returns non-zero" "1" "$rc"
-check "non-dir stdout -> did NOT cd (stayed put)"  "$home" "$PWD"
+check "clone non-dir stdout -> wrapper returns non-zero" "1" "$rc"
+check "clone non-dir stdout -> did NOT cd (stayed put)"  "$home" "$PWD"
 
 # Help/version pass straight through (no path capture, no cd attempt).
 builtin cd "$home"
 STUB_OUT="ignored" STUB_RC=0 clone --help >/dev/null 2>&1
-check "--help passes through -> no cd" "$home" "$PWD"
+check "clone --help passes through -> no cd" "$home" "$PWD"
+
+# `clone shell-init` passes straight through too (must NOT be captured + cd'd).
+builtin cd "$home"
+STUB_OUT="ignored" STUB_RC=0 clone shell-init zsh >/dev/null 2>&1
+check "clone shell-init passes through -> no cd" "$home" "$PWD"
 
 # --- worktree() dispatch -----------------------------------------------------
 # `worktree <branch>` AND the no-arg picker both capture stdout and cd into the
-# printed path; flag forms (`--list`, `-h`, `--version`) pass straight through
-# and never cd. A branch never starts with `-`, so the `-*` vs `*` split is
-# unambiguous.
+# printed path; flag forms (`--list`, `-h`, `--version`) and `shell-init` pass
+# straight through and never cd. A branch never starts with `-`, so the `-*` vs
+# `*` split is unambiguous.
 
 # A branch arg with a real dir on stdout -> cd into it.
 builtin cd "$home"
@@ -158,8 +195,13 @@ builtin cd "$home"
 STUB_OUT=$dest STUB_RC=0 worktree --help >/dev/null 2>&1
 check "worktree --flag -> passthrough, no cd" "$home" "$PWD"
 
+# `worktree shell-init` passes straight through too (must NOT be captured + cd'd).
+builtin cd "$home"
+STUB_OUT="ignored" STUB_RC=0 worktree shell-init zsh >/dev/null 2>&1
+check "worktree shell-init passes through -> no cd" "$home" "$PWD"
+
 # A branch name with a space must reach the binary as a SINGLE arg, not two
-# (regression: `eval $WORKTREE "$@"` word-split "New Feature" into New + Feature).
+# (regression: word-splitting "New Feature" into New + Feature).
 builtin cd "$home"
 argv_file=$root/worktree.argv
 STUB_OUT=$dest STUB_RC=0 STUB_ARGV_FILE=$argv_file worktree "New Feature"

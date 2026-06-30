@@ -58,8 +58,6 @@ jobs:
             echo "Packaging $bin..."
             cp "target/${{ matrix.target }}/release/$bin" artifacts/
           done
-          # Include shell-functions.sh in the artifacts
-          cp shell-functions.sh artifacts/
 
       - name: Archive artifacts
         run: |
