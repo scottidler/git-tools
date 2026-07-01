@@ -94,6 +94,39 @@ fn test_setup_populates_remote_tracking() {
 }
 
 #[test]
+fn test_setup_links_default_branch_upstream() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    make_source(root, "org", "repo");
+
+    let config = fixture_config(root, "org", "repo");
+    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+
+    let container = root.join("work").join("org").join("repo");
+    // The default branch must track origin/main so `git pull` works in the
+    // worktree without "no tracking information for the current branch".
+    let remote = git::output(&["config", "--get", "branch.main.remote"], Some(&container), None).unwrap();
+    assert_eq!(remote.stdout.trim(), "origin", "branch.main.remote should be origin");
+    let merge = git::output(&["config", "--get", "branch.main.merge"], Some(&container), None).unwrap();
+    assert_eq!(
+        merge.stdout.trim(),
+        "refs/heads/main",
+        "branch.main.merge should point at refs/heads/main"
+    );
+
+    // And `git rev-parse --abbrev-ref main@{upstream}` resolves (the real test of
+    // whether `git pull` can infer its upstream).
+    let upstream = git::output(
+        &["rev-parse", "--abbrev-ref", "main@{upstream}"],
+        Some(&container),
+        None,
+    )
+    .unwrap();
+    assert!(upstream.status.success(), "main@{{upstream}} should resolve");
+    assert_eq!(upstream.stdout.trim(), "origin/main");
+}
+
+#[test]
 fn test_default_branch_detected() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

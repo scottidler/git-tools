@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use common::bare::{AddSpec, Collision, Source};
 use common::git::{self, RepoSpec};
-use eyre::{Result, WrapErr};
+use eyre::{Result, WrapErr, bail};
 use log::{debug, warn};
 
 use crate::config::Config;
@@ -91,7 +91,87 @@ pub fn fix_fetch_refspec(container: &Path, envs: Option<&[(&str, &str)]>) -> Res
         None,
     )?;
     git::run(&["fetch", "origin"], Some(container), envs)?;
+    // Now that origin/* exists, link each local head to its upstream. A
+    // `git clone --bare` writes refs/heads/* directly but records no tracking
+    // config, so without this `git pull` in a worktree fails with "no tracking
+    // information for the current branch".
+    link_upstreams(container)?;
     Ok(())
+}
+
+/// Set `branch.<name>.remote`/`.merge` for every local head that has a matching
+/// `origin/<name>` ref but no upstream yet. A `git clone --bare` populates
+/// `refs/heads/*` from the remote without recording tracking config (a non-bare
+/// clone does this for the checked-out branch), and `git worktree add <dir>
+/// <branch>` checks out an existing local branch as-is without adding tracking -
+/// so the default worktree's `main` ends up with no upstream and `git pull`
+/// fails. Idempotent: a branch that already has an upstream is left untouched,
+/// so a reconcile re-run never clobbers a deliberate re-point. A per-branch
+/// failure is logged and skipped rather than aborting an otherwise-good clone.
+fn link_upstreams(container: &Path) -> Result<()> {
+    debug!("link_upstreams: container={:?}", container);
+    let heads = git::output(
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        Some(container),
+        None,
+    )?;
+    if !heads.status.success() {
+        bail!(
+            "git for-each-ref refs/heads failed in {}: {}",
+            container.display(),
+            heads.stdout.trim()
+        );
+    }
+
+    for branch in heads.stdout.lines().map(str::trim).filter(|b| !b.is_empty()) {
+        if branch_has_upstream(container, branch) {
+            debug!("link_upstreams: '{}' already has an upstream; skipping", branch);
+            continue;
+        }
+        if !ref_exists(container, &format!("refs/remotes/origin/{}", branch)) {
+            debug!(
+                "link_upstreams: no origin/{} ref; leaving '{}' untracked",
+                branch, branch
+            );
+            continue;
+        }
+        let upstream = format!("origin/{}", branch);
+        match git::output(
+            &["branch", "--set-upstream-to", &upstream, branch],
+            Some(container),
+            None,
+        ) {
+            Ok(out) if out.status.success() => {
+                debug!("link_upstreams: set upstream {} for '{}'", upstream, branch);
+            }
+            Ok(out) => {
+                warn!(
+                    "link_upstreams: could not set upstream {} for '{}': {}",
+                    upstream,
+                    branch,
+                    out.stderr.trim()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "link_upstreams: setting upstream {} for '{}' failed: {}",
+                    upstream, branch, e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `branch` already has an upstream recorded (`branch.<name>.merge` set).
+fn branch_has_upstream(container: &Path, branch: &str) -> bool {
+    git::output(
+        &["config", "--get", &format!("branch.{}.merge", branch)],
+        Some(container),
+        None,
+    )
+    .map(|o| o.status.success() && !o.stdout.trim().is_empty())
+    .unwrap_or(false)
 }
 
 /// Ensure the default-branch worktree exists, returning its path. For a
