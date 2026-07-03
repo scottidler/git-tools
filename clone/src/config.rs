@@ -6,16 +6,17 @@ use std::path::{Path, PathBuf};
 use common::git::{self, RepoSpec};
 use eyre::{Result, WrapErr, eyre};
 use ini::ini;
-use log::warn;
+use log::{debug, warn};
 
 use crate::cli::Cli;
 
 /// On-disk repository layout `clone` produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
-    /// Bare container (`.bare/` + `.git` pointer + nested worktrees). Default.
+    /// Bare container (`.bare/` + `.git` pointer + nested worktrees). Opt-in
+    /// via `--bare` or `[clone] default-layout = bare` in `clone.cfg`.
     Bare,
-    /// Legacy single checkout (the pre-worktree behavior).
+    /// Single checkout, no worktrees. Default.
     Flat,
 }
 
@@ -74,10 +75,20 @@ impl TryFrom<Cli> for Config {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
 
-        // --flat (explicit, or implied by --versioning) selects the legacy
+        // --flat (explicit, or implied by --versioning) selects the flat
         // layout, which has nothing to migrate to.
         if (cli.flat || cli.versioning) && matches!(op, Op::Migrate) {
             return Err(eyre!("--flat/--versioning cannot be combined with --migrate"));
+        }
+
+        // --bare and --flat/--versioning both name a layout; only one wins.
+        if cli.bare && (cli.flat || cli.versioning) {
+            return Err(eyre!("--bare cannot be combined with --flat/--versioning"));
+        }
+
+        // --migrate always produces a bare container; --bare is redundant there.
+        if cli.bare && matches!(op, Op::Migrate) {
+            return Err(eyre!("--bare cannot be combined with --migrate"));
         }
 
         // --dry-run only previews a migration; it is meaningless elsewhere.
@@ -89,7 +100,12 @@ impl TryFrom<Cli> for Config {
             Some(spec) => find_ssh_key_for_org(&spec.org)?.map(PathBuf::from),
             None => None,
         };
-        let layout = resolve_layout(cli.flat, cli.versioning, clone_cfg_value("default-layout").as_deref());
+        let layout = resolve_layout(
+            cli.bare,
+            cli.flat,
+            cli.versioning,
+            clone_cfg_value("default-layout").as_deref(),
+        );
         let default_branch = clone_cfg_value("default");
 
         Ok(Self {
@@ -109,15 +125,27 @@ impl TryFrom<Cli> for Config {
     }
 }
 
-/// Resolve the layout: CLI `--flat` (or `--versioning`, which is incompatible
-/// with bare worktrees) > `clone.cfg` `[clone] default-layout` > `Bare`.
-fn resolve_layout(flat_flag: bool, versioning: bool, cfg_layout: Option<&str>) -> Layout {
+/// Resolve the layout: CLI `--bare`/`--flat` (or `--versioning`, which implies
+/// flat) > `clone.cfg` `[clone] default-layout` > built-in default (`Flat`).
+///
+/// `Config::try_from` already rejects `--bare` combined with `--flat`/
+/// `--versioning`, so the flag checks below are mutually exclusive in
+/// practice; the flat checks run first only as a defensive ordering for
+/// direct callers (e.g. tests) that bypass that validation.
+fn resolve_layout(bare_flag: bool, flat_flag: bool, versioning: bool, cfg_layout: Option<&str>) -> Layout {
+    debug!(
+        "resolve_layout: bare_flag={} flat_flag={} versioning={} cfg_layout={:?}",
+        bare_flag, flat_flag, versioning, cfg_layout
+    );
     if flat_flag || versioning {
         return Layout::Flat;
     }
+    if bare_flag {
+        return Layout::Bare;
+    }
     match cfg_layout {
-        Some(s) if s.eq_ignore_ascii_case("flat") => Layout::Flat,
-        _ => Layout::Bare,
+        Some(s) if s.eq_ignore_ascii_case("bare") => Layout::Bare,
+        _ => Layout::Flat,
     }
 }
 

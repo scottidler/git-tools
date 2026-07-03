@@ -72,7 +72,7 @@ fn test_clone_with_verbose_shows_detailed_errors() {
 }
 
 #[test]
-fn test_clone_existing_public_repo_succeeds() {
+fn test_clone_default_produces_flat_layout() {
     let temp_dir = create_temp_dir("public");
     let binary = get_clone_binary();
 
@@ -92,28 +92,24 @@ fn test_clone_existing_public_repo_succeeds() {
         stdout
     );
 
-    // Bare is the default: the container holds .bare + a .git pointer file, and
-    // the printed destination is the default-branch worktree under it.
-    let container = temp_dir.join("rust-lang/libc");
+    // Flat is the default: a real .git directory, no .bare container, and the
+    // printed destination is the checkout itself.
+    let cloned_dir = temp_dir.join("rust-lang/libc");
     assert!(
-        container.join(".bare").is_dir(),
-        ".bare dir should exist at {:?}",
-        container
+        cloned_dir.join(".git").is_dir(),
+        ".git should be a directory in a default (flat) clone"
     );
-    assert!(container.join(".git").is_file(), ".git pointer file should exist");
+    assert!(
+        !cloned_dir.join(".bare").exists(),
+        "default clone should not have a .bare dir"
+    );
 
     // The binary ran with CWD=temp_dir and clonepath="." so it prints a path
     // relative to temp_dir (the wrapper `cd`s from the same CWD).
     let printed = stdout.trim();
     let rel = printed.strip_prefix("./").unwrap_or(printed);
     let dest = temp_dir.join(rel);
-    assert!(dest.is_dir(), "printed worktree destination should exist: {:?}", dest);
-    assert!(
-        dest.starts_with(&container),
-        "worktree {:?} should be under the container {:?}",
-        dest,
-        container
-    );
+    assert_eq!(dest, cloned_dir, "printed destination should be the checkout itself");
 
     fs::remove_dir_all(&temp_dir).ok();
 }
@@ -136,7 +132,8 @@ fn test_clone_flat_legacy_layout() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // --flat restores the legacy single checkout: a real .git directory, no .bare.
+    // --flat is a redundant alias for the (now default) flat layout: a real
+    // .git directory, no .bare.
     let cloned_dir = temp_dir.join("rust-lang/libc");
     assert!(
         cloned_dir.join(".git").is_dir(),
@@ -145,6 +142,52 @@ fn test_clone_flat_legacy_layout() {
     assert!(
         !cloned_dir.join(".bare").exists(),
         "flat clone should not have a .bare dir"
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_clone_bare_opt_in_layout() {
+    let temp_dir = create_temp_dir("bare");
+    let binary = get_clone_binary();
+
+    let output = Command::new(&binary)
+        .current_dir(&temp_dir)
+        .arg("--bare")
+        .arg("rust-lang/libc")
+        .output()
+        .expect("Failed to execute clone command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "Bare clone should succeed. Stderr: {}, Stdout: {}",
+        stderr,
+        stdout
+    );
+
+    // --bare opts into the container layout: .bare + a .git pointer file, and
+    // the printed destination is the default-branch worktree under it.
+    let container = temp_dir.join("rust-lang/libc");
+    assert!(
+        container.join(".bare").is_dir(),
+        ".bare dir should exist at {:?}",
+        container
+    );
+    assert!(container.join(".git").is_file(), ".git pointer file should exist");
+
+    let printed = stdout.trim();
+    let rel = printed.strip_prefix("./").unwrap_or(printed);
+    let dest = temp_dir.join(rel);
+    assert!(dest.is_dir(), "printed worktree destination should exist: {:?}", dest);
+    assert!(
+        dest.starts_with(&container),
+        "worktree {:?} should be under the container {:?}",
+        dest,
+        container
     );
 
     fs::remove_dir_all(&temp_dir).ok();

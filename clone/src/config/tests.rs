@@ -46,29 +46,63 @@ fn test_find_ssh_key_extracts_org_name() {
 }
 
 #[test]
-fn test_resolve_layout_default_is_bare() {
-    assert_eq!(resolve_layout(false, false, None), Layout::Bare);
+fn test_resolve_layout_default_is_flat() {
+    assert_eq!(resolve_layout(false, false, false, None), Layout::Flat);
+}
+
+#[test]
+fn test_resolve_layout_bare_flag_wins() {
+    assert_eq!(resolve_layout(true, false, false, None), Layout::Bare);
+    // CLI --bare overrides a `flat` cfg default.
+    assert_eq!(resolve_layout(true, false, false, Some("flat")), Layout::Bare);
 }
 
 #[test]
 fn test_resolve_layout_flat_flag_wins() {
-    assert_eq!(resolve_layout(true, false, None), Layout::Flat);
+    assert_eq!(resolve_layout(false, true, false, None), Layout::Flat);
     // CLI --flat overrides a `bare` cfg default.
-    assert_eq!(resolve_layout(true, false, Some("bare")), Layout::Flat);
+    assert_eq!(resolve_layout(false, true, false, Some("bare")), Layout::Flat);
 }
 
 #[test]
 fn test_resolve_layout_versioning_implies_flat() {
-    assert_eq!(resolve_layout(false, true, None), Layout::Flat);
-    assert_eq!(resolve_layout(false, true, Some("bare")), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, true, None), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, true, Some("bare")), Layout::Flat);
 }
 
 #[test]
 fn test_resolve_layout_cfg_default_layout() {
-    assert_eq!(resolve_layout(false, false, Some("flat")), Layout::Flat);
-    assert_eq!(resolve_layout(false, false, Some("FLAT")), Layout::Flat);
-    assert_eq!(resolve_layout(false, false, Some("bare")), Layout::Bare);
-    assert_eq!(resolve_layout(false, false, Some("nonsense")), Layout::Bare);
+    assert_eq!(resolve_layout(false, false, false, Some("flat")), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, false, Some("FLAT")), Layout::Flat);
+    assert_eq!(resolve_layout(false, false, false, Some("bare")), Layout::Bare);
+    assert_eq!(resolve_layout(false, false, false, Some("BARE")), Layout::Bare);
+    assert_eq!(resolve_layout(false, false, false, Some("nonsense")), Layout::Flat);
+}
+
+#[test]
+fn test_bare_conflicts_with_flat() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::try_parse_from(["clone", "--bare", "--flat", "org/repo"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--bare + --flat should be rejected; got: {err}"
+    );
+}
+
+#[test]
+fn test_bare_conflicts_with_migrate() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::try_parse_from(["clone", "--bare", "--migrate", "org/repo"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--bare + --migrate should be rejected; got: {err}"
+    );
 }
 
 #[test]
