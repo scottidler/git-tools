@@ -5,4 +5,5 @@ pub mod language;
 pub mod log;
 pub mod parallel;
 pub mod repo;
+pub mod rkvr;
 pub mod shell;

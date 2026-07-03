@@ -120,6 +120,85 @@ fn test_versioning_conflicts_with_migrate() {
 }
 
 #[test]
+fn test_flatten_conflicts_with_migrate() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // Opposite structural conversions: naming both is contradictory.
+    let cli = Cli::try_parse_from(["clone", "--flatten", "--migrate"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--flatten + --migrate should be rejected; got: {err}"
+    );
+}
+
+#[test]
+fn test_flatten_conflicts_with_bare() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // --flatten produces a flat checkout; --bare requests the opposite layout.
+    let cli = Cli::try_parse_from(["clone", "--flatten", "--bare"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--flatten + --bare should be rejected; got: {err}"
+    );
+}
+
+#[test]
+fn test_flatten_conflicts_with_versioning() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::try_parse_from(["clone", "--flatten", "--versioning"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot be combined"),
+        "--flatten + --versioning should be rejected; got: {err}"
+    );
+}
+
+#[test]
+fn test_flatten_without_repospec_is_allowed() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // Like --migrate, --flatten can derive its target from the current directory,
+    // so a repospec is optional and the op resolves to Flatten.
+    let cli = Cli::try_parse_from(["clone", "--flatten"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(config.op, Op::Flatten);
+    assert!(config.spec.is_none());
+}
+
+#[test]
+fn test_dry_run_allowed_with_flatten() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::try_parse_from(["clone", "--flatten", "--dry-run"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(config.op, Op::Flatten);
+    assert!(config.dry_run);
+}
+
+#[test]
+fn test_dry_run_rejected_without_conversion() {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // --dry-run only previews a structural conversion; a plain clone rejects it.
+    let cli = Cli::try_parse_from(["clone", "--dry-run", "org/repo"]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("--dry-run is only valid with --migrate or --flatten"),
+        "--dry-run on a plain clone should be rejected; got: {err}"
+    );
+}
+
+#[test]
 fn test_find_ssh_key_with_custom_config() {
     let _guard = ENV_LOCK.lock().unwrap();
     let prior = std::env::var("CLONE_CFG").ok();

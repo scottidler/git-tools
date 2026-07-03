@@ -18,7 +18,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use common::bare::{AddSpec, Collision, Source};
 use common::git;
@@ -99,7 +98,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     let flat = flat.as_path();
 
     // 1. PREFLIGHT (read-only; any failure here leaves the repo unchanged).
-    require_rkvr()?;
+    common::rkvr::require()?;
     let origin = origin_url(flat)?;
     let ssh_owned = ssh_env_for_origin(&origin);
     let ssh_borrow: Option<Vec<(&str, &str)>> = ssh_owned
@@ -122,7 +121,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     let wip_branches = rescue_work(flat, &worktrees)?;
 
     // 3. After rescue every tree must be clean (loop the FULL set, not just main).
-    assert_all_clean(&worktrees)?;
+    common::bare::assert_all_clean(worktrees.iter().map(|w| w.path.as_path()))?;
 
     // 4. Capture the currently checked-out branch and warn about dropped state.
     let current = current_branch(flat);
@@ -275,7 +274,7 @@ pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
     let ssh = ssh_borrow.as_deref();
 
     let reachable = check_connectivity(flat, ssh).is_ok();
-    let rkvr_ok = require_rkvr().is_ok();
+    let rkvr_ok = common::rkvr::require().is_ok();
     let worktrees = list_worktrees(flat)?;
     let current = current_branch(flat);
     let default = remote_default_branch(flat, default_fallback, ssh);
@@ -332,7 +331,7 @@ pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
 
     let mut dirty = Vec::new();
     for wt in &worktrees {
-        if is_dirty(&wt.path)? {
+        if common::bare::is_dirty(&wt.path)? {
             dirty.push(wt.path.display().to_string());
         }
     }
@@ -379,12 +378,6 @@ pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
     Ok(flat.to_path_buf())
 }
 
-/// Whether `path`'s working tree has uncommitted/untracked changes.
-fn is_dirty(path: &Path) -> Result<bool> {
-    let out = git::output(&["status", "--porcelain"], Some(path), None)?;
-    Ok(!out.stdout.trim().is_empty())
-}
-
 /// Whether `path` has unmerged paths (mid-merge/rebase).
 fn has_unmerged(path: &Path) -> Result<bool> {
     let out = git::output(&["diff", "--name-only", "--diff-filter=U"], Some(path), None)?;
@@ -401,15 +394,6 @@ fn remote_default_branch(flat: &Path, fallback: Option<&str>, ssh: Option<&[(&st
         .and_then(|r| r.split_whitespace().next())
         .map(|r| r.trim_start_matches("refs/heads/").to_string())
         .or_else(|| fallback.map(String::from))
-}
-
-/// Refuse to run without `rkvr`: migrate's removals must be recoverable, never a
-/// raw non-recoverable delete (the project's hard safety rule).
-fn require_rkvr() -> Result<()> {
-    match Command::new("rkvr").arg("--version").output() {
-        Ok(o) if o.status.success() => Ok(()),
-        _ => bail!("`rkvr` is required for --migrate (its removals must be recoverable); install it and re-run"),
-    }
 }
 
 /// Resolve the per-org SSH key for the origin URL as a `GIT_SSH_COMMAND` env
@@ -502,7 +486,7 @@ fn rescue_work(flat: &Path, worktrees: &[Worktree]) -> Result<Vec<String>> {
 
     // 2. Stash each dirty worktree (tracked + untracked) onto the shared stack.
     for wt in worktrees {
-        if !is_dirty(&wt.path)? {
+        if !common::bare::is_dirty(&wt.path)? {
             continue;
         }
         let label = wt.branch.as_deref().unwrap_or("detached");
@@ -568,22 +552,6 @@ fn path_conflicts(candidate: &str, used: &HashSet<String>) -> bool {
     used.iter().any(|e| {
         e == candidate || e.starts_with(&format!("{}/", candidate)) || candidate.starts_with(&format!("{}/", e))
     })
-}
-
-/// Assert every worktree's tree is clean after rescue (rescue should make this
-/// hold; bail loudly rather than bare-clone over uncommitted work).
-fn assert_all_clean(worktrees: &[Worktree]) -> Result<()> {
-    for wt in worktrees {
-        let status = git::output(&["status", "--porcelain"], Some(&wt.path), None)?;
-        if !status.stdout.trim().is_empty() {
-            bail!(
-                "worktree {} is still not clean after rescue:\n{}",
-                wt.path.display(),
-                status.stdout.trim()
-            );
-        }
-    }
-    Ok(())
 }
 
 /// The `origin` remote URL of the flat checkout.
@@ -855,18 +823,12 @@ fn sibling(flat: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(format!("{}.{}", name, suffix)))
 }
 
-/// Remove a directory recoverably via `rkvr rmrf`. `rkvr` presence is enforced
-/// by `require_rkvr` in preflight, so a missing rkvr here is an error, never a
-/// silent non-recoverable delete. A missing path is a no-op.
+/// Remove a directory recoverably via the shared [`common::rkvr::rmrf`]. `rkvr`
+/// presence is enforced by [`common::rkvr::require`] in preflight, so a missing
+/// rkvr here is an error, never a silent non-recoverable delete. A missing path
+/// is a no-op.
 fn remove_dir(path: &Path) -> Result<()> {
-    if path.symlink_metadata().is_err() {
-        return Ok(());
-    }
-    match Command::new("rkvr").arg("rmrf").arg(path).status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => bail!("rkvr rmrf {} failed: {}", path.display(), status),
-        Err(e) => bail!("rkvr rmrf {} could not run: {}", path.display(), e),
-    }
+    common::rkvr::rmrf(path)
 }
 
 #[cfg(test)]

@@ -29,6 +29,10 @@ pub enum Op {
     /// optional (derived from the current directory's enclosing repo when
     /// absent).
     Migrate,
+    /// Collapse an existing bare container back into a flat checkout. `spec` is
+    /// optional (derived from the current directory's enclosing container when
+    /// absent). Refuses on any unsafe/unmergeable worktree state.
+    Flatten,
 }
 
 /// Validated, resolved configuration consumed by [`crate::run`].
@@ -67,10 +71,23 @@ impl TryFrom<Cli> for Config {
             None => None,
         };
 
-        let op = if cli.migrate { Op::Migrate } else { Op::Clone };
+        // --migrate and --flatten are opposite structural conversions; naming
+        // both is contradictory, so reject it before deriving the op (a silent
+        // precedence would run one and ignore the other).
+        if cli.migrate && cli.flatten {
+            return Err(eyre!("--migrate and --flatten cannot be combined"));
+        }
 
-        // Validation: only clone needs a repospec; --migrate can derive its
-        // target from the current directory, so a repospec is optional there.
+        let op = if cli.migrate {
+            Op::Migrate
+        } else if cli.flatten {
+            Op::Flatten
+        } else {
+            Op::Clone
+        };
+
+        // Validation: only clone needs a repospec; --migrate/--flatten can derive
+        // their target from the current directory, so a repospec is optional there.
         if matches!(op, Op::Clone) && spec.is_none() {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
         }
@@ -91,9 +108,19 @@ impl TryFrom<Cli> for Config {
             return Err(eyre!("--bare cannot be combined with --migrate"));
         }
 
-        // --dry-run only previews a migration; it is meaningless elsewhere.
-        if cli.dry_run && !matches!(op, Op::Migrate) {
-            return Err(eyre!("--dry-run is only valid with --migrate"));
+        // --flatten produces a flat checkout; a bare/versioning layout request is
+        // contradictory there.
+        if cli.bare && matches!(op, Op::Flatten) {
+            return Err(eyre!("--bare cannot be combined with --flatten"));
+        }
+        if cli.versioning && matches!(op, Op::Flatten) {
+            return Err(eyre!("--versioning cannot be combined with --flatten"));
+        }
+
+        // --dry-run only previews a structural conversion (migrate/flatten); it is
+        // meaningless for a plain clone.
+        if cli.dry_run && matches!(op, Op::Clone) {
+            return Err(eyre!("--dry-run is only valid with --migrate or --flatten"));
         }
 
         let ssh_key = match &spec {

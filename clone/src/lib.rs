@@ -3,6 +3,7 @@
 pub mod bare;
 pub mod cli;
 pub mod config;
+pub mod flatten;
 pub mod migrate;
 pub mod shell;
 pub mod transport;
@@ -42,6 +43,21 @@ pub fn run(config: Config) -> Result<PathBuf> {
                 migrate::dry_run(&flat, config.default_branch.as_deref())
             } else {
                 migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
+            }
+        }
+        Op::Flatten => {
+            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no
+            // spec, flatten the bare container the user is standing in (derived
+            // from the enclosing container, resolvable even from a linked
+            // worktree or the container root).
+            let container = match &config.spec {
+                Some(spec) => config.clonepath.join(spec.to_string()),
+                None => flatten::container_from_cwd()?,
+            };
+            if config.dry_run {
+                flatten::dry_run(&container, config.default_branch.as_deref())
+            } else {
+                flatten::flatten(&container, config.default_branch.as_deref())
             }
         }
     }

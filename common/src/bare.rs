@@ -143,6 +143,35 @@ fn parse_worktrees(porcelain: &str) -> Vec<WorktreeRow> {
     rows
 }
 
+/// Whether `path`'s working tree has uncommitted or untracked changes
+/// (`git status --porcelain` reports anything). Lifted from `clone::migrate` so
+/// both the forward migration and the `--flatten` collapse share one definition.
+pub fn is_dirty(path: &Path) -> Result<bool> {
+    debug!("is_dirty: path={:?}", path);
+    let out = git::output(&["status", "--porcelain"], Some(path), None)?;
+    Ok(!out.stdout.trim().is_empty())
+}
+
+/// Assert every working tree in `paths` is clean, bailing loudly (naming the
+/// offending tree and its dirty entries) on the first that is not. Shared by the
+/// forward migration (post-rescue invariant) and the `--flatten` collapse.
+pub fn assert_all_clean<'a, I>(paths: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    for path in paths {
+        let status = git::output(&["status", "--porcelain"], Some(path), None)?;
+        if !status.stdout.trim().is_empty() {
+            bail!(
+                "working tree {} is not clean:\n{}",
+                path.display(),
+                status.stdout.trim()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Where a new worktree's content comes from.
 pub enum Source<'a> {
     /// Check out an existing local branch as-is: `worktree add <dir> <branch>`.

@@ -11,7 +11,7 @@ use crate::REMOTE_URLS;
 #[command(author = "Scott A. Idler <scott.a.idler@gmail.com>")]
 #[command(arg_required_else_help = true)]
 #[command(
-    after_help = "Layout: `clone <org>/<repo>` produces a flat checkout by default; pass --bare for a bare container + worktrees (or set `[clone] default-layout = bare` in clone.cfg). Shell integration: `clone shell-init zsh` prints a cd-wrapper function; install it with `eval \"$(command clone shell-init zsh)\"` in your .zshrc so clone cd's you into the new checkout."
+    after_help = "Layout: `clone <org>/<repo>` produces a flat checkout by default; pass --bare for a bare container + worktrees (or set `[clone] default-layout = bare` in clone.cfg). Convert between layouts with `clone --migrate` (flat -> bare) and `clone --flatten` (bare -> flat; refuses on any unmergeable/unsafe worktree state). Shell integration: `clone shell-init zsh` prints a cd-wrapper function; install it with `eval \"$(command clone shell-init zsh)\"` in your .zshrc so clone cd's you into the new checkout."
 )]
 pub struct Cli {
     #[arg(short = 'l', long, default_value_t = LevelFilter::Info, help = "log level: error, warn, info, debug, trace")]
@@ -51,7 +51,13 @@ pub struct Cli {
 
     #[arg(
         long,
-        help = "with --migrate, print what would happen (worktrees, rescues, removals) without changing anything"
+        help = "collapse a bare container back into a flat checkout; refuses on any unsafe/unmergeable worktree state. With no repospec, flattens the container you're standing in"
+    )]
+    pub flatten: bool,
+
+    #[arg(
+        long,
+        help = "with --migrate or --flatten, print what would happen (worktrees, refs, removals) without changing anything"
     )]
     pub dry_run: bool,
 
