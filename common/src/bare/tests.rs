@@ -197,6 +197,52 @@ fn test_reuse_finds_legacy_raw_path_by_branch() {
 }
 
 #[test]
+fn test_resolve_worktrees_bare_entry_only() {
+    let tmp = TempDir::new().unwrap();
+    let container = make_container(tmp.path());
+
+    // No worktree has been added yet: the only row is the bare entry itself.
+    let rows = resolve_worktrees(&container).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].bare);
+    assert_eq!(rows[0].branch, None);
+    assert_eq!(rows[0].head, None, "the bare entry carries no HEAD line");
+    assert!(!rows[0].locked);
+}
+
+#[test]
+fn test_resolve_worktrees_reads_branch_detached_and_locked() {
+    let tmp = TempDir::new().unwrap();
+    let container = make_container(tmp.path());
+
+    git_run(&container, &["worktree", "add", "main", "main"]);
+    git_run(&container, &["worktree", "add", "--detach", "detached"]);
+    git_run(&container, &["worktree", "lock", "detached", "--reason", "testing"]);
+
+    let rows = resolve_worktrees(&container).unwrap();
+    assert_eq!(rows.len(), 3, "bare entry + main + detached");
+
+    let bare = rows.iter().find(|r| r.bare).expect("bare row present");
+    assert_eq!(bare.path, container.join(".bare"));
+
+    let main = rows
+        .iter()
+        .find(|r| r.branch.as_deref() == Some("main"))
+        .expect("main worktree present");
+    assert_eq!(main.path, container.join("main"));
+    assert!(main.head.is_some(), "checked-out worktree carries a HEAD sha");
+    assert!(!main.locked);
+
+    let detached = rows
+        .iter()
+        .find(|r| !r.bare && r.branch.is_none())
+        .expect("detached worktree present");
+    assert_eq!(detached.path, container.join("detached"));
+    assert!(detached.head.is_some(), "detached worktree still carries a HEAD sha");
+    assert!(detached.locked, "the `locked <reason>` line must set locked");
+}
+
+#[test]
 fn test_uniquify_appends_suffix_on_collision() {
     let tmp = TempDir::new().unwrap();
     let container = make_container(tmp.path());

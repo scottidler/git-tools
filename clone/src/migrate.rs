@@ -445,46 +445,19 @@ fn check_connectivity(flat: &Path, ssh: Option<&[(&str, &str)]>) -> Result<()> {
     Ok(())
 }
 
-/// Parse `git worktree list --porcelain` into the main worktree plus every
-/// linked worktree, capturing path, branch, and HEAD sha.
+/// List the flat checkout's main worktree plus every linked worktree, via the
+/// shared `common::bare::resolve_worktrees` parser.
 fn list_worktrees(flat: &Path) -> Result<Vec<Worktree>> {
     debug!("list_worktrees: flat={:?}", flat);
-    let out = git::output(&["worktree", "list", "--porcelain"], Some(flat), None)?;
-    if !out.status.success() {
-        bail!(
-            "could not list worktrees for '{}': {}",
-            flat.display(),
-            out.stderr.trim()
-        );
-    }
-
-    let mut worktrees = Vec::new();
-    let mut path: Option<PathBuf> = None;
-    let mut branch: Option<String> = None;
-    let mut head = String::new();
-    let flush =
-        |worktrees: &mut Vec<Worktree>, path: &mut Option<PathBuf>, branch: &mut Option<String>, head: &mut String| {
-            if let Some(p) = path.take() {
-                worktrees.push(Worktree {
-                    path: p,
-                    branch: branch.take(),
-                    head: std::mem::take(head),
-                });
-            }
-        };
-    for line in out.stdout.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            flush(&mut worktrees, &mut path, &mut branch, &mut head);
-            path = Some(PathBuf::from(p.trim()));
-        } else if let Some(h) = line.strip_prefix("HEAD ") {
-            head = h.trim().to_string();
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            branch = Some(b.trim().trim_start_matches("refs/heads/").to_string());
-        } else if line.trim().is_empty() {
-            flush(&mut worktrees, &mut path, &mut branch, &mut head);
-        }
-    }
-    flush(&mut worktrees, &mut path, &mut branch, &mut head);
+    let worktrees = common::bare::resolve_worktrees(flat)
+        .wrap_err_with(|| format!("could not list worktrees for '{}'", flat.display()))?
+        .into_iter()
+        .map(|row| Worktree {
+            path: row.path,
+            branch: row.branch,
+            head: row.head.unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
     debug!("list_worktrees: found {} worktree(s)", worktrees.len());
     Ok(worktrees)
 }

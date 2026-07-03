@@ -70,6 +70,79 @@ pub fn ref_exists(container: &Path, refname: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One worktree entry from `git worktree list --porcelain`, unified across the
+/// four ad-hoc parsers this replaces (`repo/info.rs`, `bare.rs`,
+/// `clone/migrate.rs`, `worktree/list.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRow {
+    /// Absolute path of the worktree's working directory.
+    pub path: PathBuf,
+    /// The checked-out branch, or `None` for a detached HEAD.
+    pub branch: Option<String>,
+    /// The worktree's HEAD sha; `None` when git reports none (the bare entry
+    /// itself). Needed to rescue a detached-HEAD worktree.
+    pub head: Option<String>,
+    /// The bare repository entry itself (no working tree to `cd` into).
+    pub bare: bool,
+    /// A locked worktree (`git worktree lock`); prune/list must skip it.
+    pub locked: bool,
+}
+
+/// Enumerate every worktree of `container` via one `git worktree list
+/// --porcelain`, the single parser replacing four ad-hoc copies.
+pub fn resolve_worktrees(container: &Path) -> Result<Vec<WorktreeRow>> {
+    debug!("resolve_worktrees: container={:?}", container);
+    let out = git::output(&["worktree", "list", "--porcelain"], Some(container), None)?;
+    if !out.status.success() {
+        bail!(
+            "git worktree list failed in '{}': {}",
+            container.display(),
+            out.stderr.trim()
+        );
+    }
+    let rows = parse_worktrees(&out.stdout);
+    debug!("resolve_worktrees: found {} worktree(s)", rows.len());
+    Ok(rows)
+}
+
+/// Parse the porcelain stream into rows. Blocks are separated by blank lines;
+/// each opens with `worktree <path>`, then optional `HEAD <sha>` / `bare` /
+/// `branch <ref>` / `detached` / `locked[ <reason>]` lines.
+fn parse_worktrees(porcelain: &str) -> Vec<WorktreeRow> {
+    let mut rows = Vec::new();
+    let mut cur: Option<WorktreeRow> = None;
+
+    for line in porcelain.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            if let Some(row) = cur.take() {
+                rows.push(row);
+            }
+            cur = Some(WorktreeRow {
+                path: PathBuf::from(rest.trim()),
+                branch: None,
+                head: None,
+                bare: false,
+                locked: false,
+            });
+        } else if let Some(row) = cur.as_mut() {
+            if line == "bare" {
+                row.bare = true;
+            } else if let Some(sha) = line.strip_prefix("HEAD ") {
+                row.head = Some(sha.trim().to_string());
+            } else if let Some(refname) = line.strip_prefix("branch ") {
+                row.branch = Some(refname.trim().trim_start_matches("refs/heads/").to_string());
+            } else if line == "locked" || line.starts_with("locked ") {
+                row.locked = true;
+            }
+            // `detached` carries no extra state beyond leaving `branch` unset.
+        }
+    }
+    if let Some(row) = cur.take() {
+        rows.push(row);
+    }
+    rows
+}
+
 /// Where a new worktree's content comes from.
 pub enum Source<'a> {
     /// Check out an existing local branch as-is: `worktree add <dir> <branch>`.
@@ -208,29 +281,12 @@ fn unique_dir(container: &Path, base: &str) -> String {
 }
 
 /// The path of the worktree currently hosting `branch`, found via
-/// `git worktree list --porcelain` (by branch, not by derived dir), or `None`.
+/// `resolve_worktrees` (by branch, not by derived dir), or `None`.
 fn worktree_path_for_branch(container: &Path, branch: &str) -> Result<Option<PathBuf>> {
-    let out = git::output(&["worktree", "list", "--porcelain"], Some(container), None)?;
-    if !out.status.success() {
-        bail!(
-            "git worktree list failed in {}: {}",
-            container.display(),
-            out.stderr.trim()
-        );
-    }
-    let target = format!("refs/heads/{}", branch);
-    let mut cur_path: Option<PathBuf> = None;
-    for line in out.stdout.lines() {
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            cur_path = Some(PathBuf::from(rest));
-        } else if let Some(refname) = line.strip_prefix("branch ")
-            && refname == target
-            && let Some(path) = cur_path.clone()
-        {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
+    Ok(resolve_worktrees(container)?
+        .into_iter()
+        .find(|row| row.branch.as_deref() == Some(branch))
+        .map(|row| row.path))
 }
 
 /// Ref-probing convenience for the `worktree` tool: take a raw branch string,

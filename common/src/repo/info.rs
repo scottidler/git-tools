@@ -64,44 +64,20 @@ impl RepoInfo {
         let container = container.as_ref();
         let slug = container_slug(container);
 
-        let out = git::output(&["worktree", "list", "--porcelain"], Some(container), None)?;
-        if !out.status.success() {
-            eyre::bail!(
-                "git worktree list failed in '{}': {}",
-                container.display(),
-                out.stderr.trim()
-            );
-        }
-
-        let mut infos = Vec::new();
-        for block in out.stdout.split("\n\n") {
-            let mut wt_path: Option<PathBuf> = None;
-            let mut branch: Option<String> = None;
-            let mut is_bare = false;
-
-            for line in block.lines() {
-                if let Some(p) = line.strip_prefix("worktree ") {
-                    wt_path = Some(PathBuf::from(p.trim()));
-                } else if line.trim() == "bare" {
-                    is_bare = true;
-                } else if let Some(b) = line.strip_prefix("branch ") {
-                    branch = Some(b.trim().trim_start_matches("refs/heads/").to_string());
-                }
-            }
-
-            if is_bare {
-                continue;
-            }
-            if let Some(path) = wt_path {
-                let name = branch.unwrap_or_else(|| {
-                    path.file_name()
+        let infos = crate::bare::resolve_worktrees(container)?
+            .into_iter()
+            .filter(|row| !row.bare)
+            .map(|row| {
+                let name = row.branch.unwrap_or_else(|| {
+                    row.path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("detached")
                         .to_string()
                 });
-                infos.push(RepoInfo::with_worktree(path, slug.clone(), Some(name)));
-            }
-        }
+                RepoInfo::with_worktree(row.path, slug.clone(), Some(name))
+            })
+            .collect();
 
         Ok(infos)
     }
