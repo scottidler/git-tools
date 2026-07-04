@@ -266,6 +266,167 @@ fn test_e2e_flatten_round_trip_preserves_content() {
 }
 
 #[test]
+fn test_e2e_migrate_then_flatten_preserves_local_only_branch() {
+    // A local-only branch (never pushed) must survive the full flat -> bare -> flat
+    // round trip. The prior round-trip test seeds via `--bare`, which would not
+    // catch a ref dropped by the forward `--migrate`; this drives `--migrate` and
+    // asserts a local-only `refs/*` entry is preserved end to end.
+    if !rkvr_available() {
+        eprintln!("SKIP test_e2e_migrate_then_flatten_preserves_local_only_branch: rkvr not available");
+        return;
+    }
+    let tmp = create_temp_dir("migrate_flatten_localref");
+    let (org, repo) = ("e2eorg", "e2erepo");
+    let remote_root = make_remote(&tmp, org, repo);
+    let work = tmp.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let repospec = format!("{}/{}", org, repo);
+
+    // Flat clone (the default layout) from the local remote.
+    let clone_out = run_clone(
+        &tmp,
+        &[
+            "--remote",
+            remote_root.to_str().unwrap(),
+            "--clonepath",
+            work.to_str().unwrap(),
+            &repospec,
+        ],
+    );
+    assert!(
+        clone_out.status.success(),
+        "flat clone should succeed: {}",
+        String::from_utf8_lossy(&clone_out.stderr)
+    );
+    let checkout = work.join(org).join(repo);
+    assert!(checkout.join(".git").is_dir(), "flat clone should have a real .git dir");
+
+    // Create a LOCAL-ONLY branch with a unique commit, then return to main so the
+    // working tree is clean. Its commit is ahead of main but it has NO worktree,
+    // so --flatten's per-worktree ancestry check never touches it - it must be
+    // preserved purely by the refs/* retention proof.
+    git_run(&checkout, &["checkout", "-b", "local-only"]);
+    fs::write(checkout.join("local.txt"), "local-only work\n").unwrap();
+    git_run(&checkout, &["add", "."]);
+    commit(&checkout, "local-only commit");
+    let local_oid = git_stdout(&checkout, &["rev-parse", "refs/heads/local-only"]);
+    git_run(&checkout, &["checkout", "main"]);
+
+    // Forward migration: flat -> bare.
+    let migrate_out = run_clone(&tmp, &["--migrate", "--clonepath", work.to_str().unwrap(), &repospec]);
+    assert!(
+        migrate_out.status.success(),
+        "migrate should succeed: {}",
+        String::from_utf8_lossy(&migrate_out.stderr)
+    );
+    assert!(
+        checkout.join(".bare").is_dir(),
+        "migrated repo should be a bare container"
+    );
+    assert_eq!(
+        git_stdout(&checkout, &["rev-parse", "refs/heads/local-only"]),
+        local_oid,
+        "local-only branch must survive the forward --migrate"
+    );
+
+    // Reverse: bare -> flat.
+    let flatten_out = run_clone(&tmp, &["--flatten", "--clonepath", work.to_str().unwrap(), &repospec]);
+    assert!(
+        flatten_out.status.success(),
+        "flatten should succeed: {}",
+        String::from_utf8_lossy(&flatten_out.stderr)
+    );
+    assert!(
+        checkout.join(".git").is_dir(),
+        "flattened repo should have a real .git dir"
+    );
+    assert!(
+        !checkout.join(".bare").exists(),
+        "flattened repo should have no .bare dir"
+    );
+
+    // The local-only ref survives the full flat -> bare -> flat round trip at the
+    // identical OID.
+    assert_eq!(
+        git_stdout(&checkout, &["rev-parse", "refs/heads/local-only"]),
+        local_oid,
+        "local-only branch must survive the migrate -> flatten round trip"
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn test_e2e_flatten_reports_ignored_files_to_stderr() {
+    // The ignored-file report must actually reach stderr (not only populate the
+    // in-memory inspection). `--flatten --dry-run` lists them and makes no changes.
+    if !rkvr_available() {
+        eprintln!("SKIP test_e2e_flatten_reports_ignored_files_to_stderr: rkvr not available");
+        return;
+    }
+    let tmp = create_temp_dir("flatten_ignored_stderr");
+    let (org, repo) = ("e2eorg", "e2erepo");
+    let remote_root = make_remote(&tmp, org, repo);
+    let work = tmp.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let repospec = format!("{}/{}", org, repo);
+
+    let bare_out = run_clone(
+        &tmp,
+        &[
+            "--bare",
+            "--remote",
+            remote_root.to_str().unwrap(),
+            "--clonepath",
+            work.to_str().unwrap(),
+            &repospec,
+        ],
+    );
+    assert!(
+        bare_out.status.success(),
+        "bare clone should succeed: {}",
+        String::from_utf8_lossy(&bare_out.stderr)
+    );
+    let container = work.join(org).join(repo);
+    let main_wt = container.join("main");
+
+    // Commit a .gitignore, then drop an ignored file the report must surface.
+    fs::write(main_wt.join(".gitignore"), ".env\n").unwrap();
+    git_run(&main_wt, &["add", ".gitignore"]);
+    commit(&main_wt, "add gitignore");
+    fs::write(main_wt.join(".env"), "SECRET=1").unwrap();
+
+    let dry = run_clone(
+        &tmp,
+        &[
+            "--flatten",
+            "--dry-run",
+            "--clonepath",
+            work.to_str().unwrap(),
+            &repospec,
+        ],
+    );
+    assert!(
+        dry.status.success(),
+        "--flatten --dry-run should succeed: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        stderr.contains(".env"),
+        "ignored files must be reported to stderr; got: {}",
+        stderr
+    );
+    // Dry-run makes no changes: still a bare container.
+    assert!(
+        container.join(".bare").is_dir(),
+        "dry-run must not collapse the container"
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
 fn test_e2e_flatten_dry_run_makes_no_changes() {
     if !rkvr_available() {
         eprintln!("SKIP test_e2e_flatten_dry_run_makes_no_changes: rkvr not available");

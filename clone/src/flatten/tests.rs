@@ -388,6 +388,137 @@ fn test_inspect_refuses_active_bisect() {
 }
 
 #[test]
+fn test_inspect_refuses_in_progress_cherry_pick() {
+    // A REAL interrupted cherry-pick (not a synthetic CHERRY_PICK_HEAD file):
+    // conflicting commits leave the main worktree mid-cherry-pick, which
+    // in_progress_operation must detect through inspect.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let (container, _) = make_container(root);
+    let main_wt = container.join("main");
+
+    // base commit carrying c.txt
+    fs::write(main_wt.join("c.txt"), "A\n").unwrap();
+    git_run(&main_wt, &["add", "."]);
+    commit(&main_wt, "base");
+    // divergent branch 'other' changes c.txt
+    git_run(&main_wt, &["checkout", "-b", "other"]);
+    fs::write(main_wt.join("c.txt"), "B\n").unwrap();
+    git_run(&main_wt, &["add", "."]);
+    commit(&main_wt, "other change");
+    // back on main, a conflicting change to the same line
+    git_run(&main_wt, &["checkout", "main"]);
+    fs::write(main_wt.join("c.txt"), "C\n").unwrap();
+    git_run(&main_wt, &["add", "."]);
+    commit(&main_wt, "main change");
+    // cherry-pick 'other' onto main -> conflict, stops mid-op (CHERRY_PICK_HEAD).
+    let cp = git::output(
+        &["-c", "user.email=t@e.com", "-c", "user.name=t", "cherry-pick", "other"],
+        Some(&main_wt),
+        None,
+    )
+    .unwrap();
+    assert!(!cp.status.success(), "cherry-pick should conflict and stop");
+
+    let insp = inspect(&container, Some("main")).unwrap();
+    assert!(
+        insp.refusals.iter().any(|r| r.contains("in-progress cherry-pick")),
+        "must refuse a real in-progress cherry-pick; got {:?}",
+        insp.refusals
+    );
+}
+
+#[test]
+fn test_inspect_refuses_dirty_submodule() {
+    // A submodule whose checked-out HEAD is ahead of the recorded gitlink reports
+    // `+` from `git submodule status` and must block the collapse.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let (container, _) = make_container(root);
+    let main_wt = container.join("main");
+
+    // A standalone repo to embed as a submodule.
+    let sub_src = root.join("sub-src");
+    fs::create_dir_all(&sub_src).unwrap();
+    git_run(&sub_src, &["init", "-b", "main"]);
+    fs::write(sub_src.join("s.txt"), "one").unwrap();
+    git_run(&sub_src, &["add", "."]);
+    commit(&sub_src, "sub init");
+
+    // Add it as a submodule of the main worktree (file:// transport must be
+    // explicitly allowed on modern git), then commit the gitlink.
+    git_run(
+        &main_wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            sub_src.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    commit(&main_wt, "add submodule");
+
+    // Advance the submodule's checked-out HEAD past the recorded gitlink -> `+`.
+    let sub_wt = main_wt.join("sub");
+    fs::write(sub_wt.join("s.txt"), "two").unwrap();
+    git_run(&sub_wt, &["add", "."]);
+    commit(&sub_wt, "advance submodule");
+
+    let insp = inspect(&container, Some("main")).unwrap();
+    assert!(
+        insp.refusals.iter().any(|r| r.contains("submodule")),
+        "must refuse a dirty submodule; got {:?}",
+        insp.refusals
+    );
+}
+
+#[test]
+fn test_inspect_refuses_when_safety_check_errors() {
+    // Fail-closed: when a per-worktree safety check cannot even be evaluated (its
+    // git invocation errors), the collapse must REFUSE, not proceed. A linked
+    // worktree's directory is removed out from under its admin entry, so
+    // is_dirty / worktree_gitdir / dirty_submodules all error on that worktree.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let (container, _) = make_container(root);
+
+    // A linked worktree at main's HEAD (an ancestor of the default, so ancestry
+    // alone would not refuse it), then blow away its working directory.
+    git_run(&container, &["worktree", "add", "gone", "-b", "gone"]);
+    fs::remove_dir_all(container.join("gone")).unwrap();
+
+    let insp = inspect(&container, Some("main")).unwrap();
+    assert!(
+        insp.refusals
+            .iter()
+            .any(|r| r.contains("could not be checked for uncommitted changes")),
+        "is_dirty error must refuse (fail-closed); got {:?}",
+        insp.refusals
+    );
+    assert!(
+        insp.refusals
+            .iter()
+            .any(|r| r.contains("git dir could not be resolved")),
+        "worktree_gitdir error must refuse (fail-closed); got {:?}",
+        insp.refusals
+    );
+    assert!(
+        insp.refusals
+            .iter()
+            .any(|r| r.contains("submodule state could not be determined")),
+        "dirty_submodules error must refuse (fail-closed); got {:?}",
+        insp.refusals
+    );
+    assert!(
+        insp.refusals.iter().all(|r| r.contains("fail-closed")),
+        "every refusal in this fixture is a fail-closed one; got {:?}",
+        insp.refusals
+    );
+}
+
+#[test]
 fn test_inspect_clean_container_has_no_refusals() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

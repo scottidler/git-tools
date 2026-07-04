@@ -212,18 +212,28 @@ fn inspect(container: &Path, default_fallback: Option<&str>) -> Result<Inspectio
         let wt = row.path.as_path();
         debug!("inspect: worktree {:?} branch={:?}", wt, row.branch);
 
-        // Uncommitted changes or untracked files.
+        // Uncommitted changes or untracked files. A check that itself ERRORS
+        // leaves the worktree's safety UNDETERMINED, so it must BLOCK the collapse
+        // (fail-closed) - `reset --hard` would otherwise be free to discard work
+        // that no `refs/*` retention proof guards.
         match common::bare::is_dirty(wt) {
             Ok(true) => refusals.push(format!(
                 "worktree {} has uncommitted changes or untracked files",
                 wt.display()
             )),
             Ok(false) => {}
-            Err(e) => warn!("inspect: could not check dirtiness of {}: {}", wt.display(), e),
+            Err(e) => refusals.push(format!(
+                "worktree {} could not be checked for uncommitted changes ({}); refusing (fail-closed)",
+                wt.display(),
+                e
+            )),
         }
 
         // Active merge / rebase / cherry-pick / revert / bisect in the worktree's
-        // private gitdir (not a WorktreeRow field).
+        // private gitdir (not a WorktreeRow field). If the gitdir cannot be
+        // resolved, BOTH the in-progress-operation and the per-worktree-config /
+        // sparse-checkout checks are unverifiable - fail-closed rather than
+        // silently skip them.
         match worktree_gitdir(wt) {
             Ok(gitdir) => {
                 if let Some(op) = in_progress_operation(&gitdir) {
@@ -241,10 +251,15 @@ fn inspect(container: &Path, default_fallback: Option<&str>) -> Result<Inspectio
                     ));
                 }
             }
-            Err(e) => warn!("inspect: could not resolve gitdir of {}: {}", wt.display(), e),
+            Err(e) => refusals.push(format!(
+                "worktree {} git dir could not be resolved ({}); in-progress-operation and per-worktree-state checks are unverifiable; refusing (fail-closed)",
+                wt.display(),
+                e
+            )),
         }
 
-        // Dirty / conflicted submodules.
+        // Dirty / conflicted submodules. An undeterminable submodule state (git
+        // erroring, not merely "no submodules") must BLOCK the collapse.
         match dirty_submodules(wt) {
             Ok(subs) if !subs.is_empty() => refusals.push(format!(
                 "worktree {} has dirty/conflicted submodule(s): {}",
@@ -252,7 +267,11 @@ fn inspect(container: &Path, default_fallback: Option<&str>) -> Result<Inspectio
                 subs.join(", ")
             )),
             Ok(_) => {}
-            Err(e) => warn!("inspect: could not check submodules of {}: {}", wt.display(), e),
+            Err(e) => refusals.push(format!(
+                "worktree {} submodule state could not be determined ({}); refusing (fail-closed)",
+                wt.display(),
+                e
+            )),
         }
 
         // Branch ancestry / detached-HEAD reachability. A worktree branch with
@@ -399,12 +418,17 @@ fn commit_reachable_from_ref(container: &Path, sha: &str) -> bool {
 /// Names of dirty or conflicted submodules in `worktree`, via `git submodule
 /// status --recursive` (a `+` prefix = checked-out commit differs; `U` = merge
 /// conflict). Uninitialized (`-`) submodules carry no local state to lose, so they
-/// are not treated as dirty. Empty for a repo with no submodules.
+/// are not treated as dirty. A repo with no submodules exits 0 with empty output,
+/// so a NON-success exit is a genuine error (undeterminable state) - it bails
+/// rather than reporting "clean", so the preflight fails closed on it.
 fn dirty_submodules(worktree: &Path) -> Result<Vec<String>> {
     let out = git::output(&["submodule", "status", "--recursive"], Some(worktree), None)?;
     if !out.status.success() {
-        // No `.gitmodules` / not a submodule superproject is a clean, empty result.
-        return Ok(Vec::new());
+        bail!(
+            "`git submodule status` failed in {}: {}",
+            worktree.display(),
+            out.stderr.trim()
+        );
     }
     let dirty = out
         .stdout
