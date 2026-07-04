@@ -2,8 +2,8 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-07-03
-**Status:** Implemented
-**Review Passes Completed:** 5/5 + two cross-model panels (design-research; Architect/Gemini + Staff-Engineer/Codex full review; second focused panel on the rewritten `--flatten` contract)
+**Status:** Implemented (git-tools phases 0a/1/2/3/4, gx phases 0b + v0.3.1; git-tools Phase 4 audit remediation lands in the next patch release)
+**Review Passes Completed:** 5/5 + three cross-model panels (design-research; Architect/Gemini + Staff-Engineer/Codex design review; second focused panel on the `--flatten` contract; post-implementation audit 2026-07-04 across git-tools + gx, which produced Phase 4)
 
 ## Summary
 
@@ -309,6 +309,38 @@ the first draft self-contradictory.
 **Model:** sonnet
 - `clone/tests/` + gx integration: flat-default, `--bare`, forward migration,
   reverse `--flatten` round-trip, and gx treating a container as one repo.
+
+#### Phase 4: Post-implementation audit remediation
+**Model:** opus
+Findings from the two-model implementation audit (2026-07-04, Architect/Gemini +
+Staff-Engineer/Codex, git-tools + gx). gx's finding already shipped as v0.3.1;
+the git-tools items below are pending (target: git-tools v0.3.2).
+- **[HIGH, git-tools] Fail-closed preflight.** `clone --flatten`'s preflight
+  (`clone/src/flatten.rs::inspect`) currently warns-and-continues when a safety
+  check itself ERRORS: `is_dirty` Err (~:222), `worktree_gitdir` Err (~:245,
+  skipping both in-progress-op and per-worktree-config/sparse checks), and
+  `dirty_submodules` treating a non-success `git submodule status` as clean
+  (~:405) plus its warn-only Err arm (~:255). This violates the refuse-first
+  invariant and the "defaults fail CLOSED" rule: an undeterminable check must
+  BLOCK the collapse, not proceed. Fix: those Err/non-success arms push a
+  refusal. (`reset --hard` can otherwise discard a worktree's uncommitted work
+  while `verify_flat` still passes, since the retention proof guards only
+  `refs/*`, not working-tree state; only the rkvr archive saves it.)
+- **[MEDIUM, git-tools] Phase 2/3 test hardening.** Add: a dirty-submodule
+  refuse test; a real in-progress rebase/cherry-pick/revert refuse test (not
+  only the synthetic MERGE_HEAD/bisect); an assertion that ignored-file
+  reporting reaches stderr; and a binary-level migrate->flatten round-trip that
+  asserts a local-only `refs/*` entry survives (current e2e seeds via `--bare`,
+  not `--migrate`, so it would not catch a dropped local ref).
+- **[LOW, git-tools] Doc drift.** `CLAUDE.md` (~:105,130,151) still documents
+  bare as `clone`'s default; update to flat-default + `--bare`.
+- **[already shipped, gx v0.3.1] `gx clone` bare-container update.**
+  `clone_or_update_repo` ran git status/checkout/pull at the container root
+  (not a work tree, exit 128); now routes through `bare::default_worktree`
+  (`gx/src/git.rs::resolve_update_work_tree`) with a regression test.
+- **Success criteria:** a `--flatten` preflight where `is_dirty`/`worktree_gitdir`/
+  `dirty_submodules` errors REFUSES (new test); `otto ci` green in git-tools;
+  `CLAUDE.md` no longer says bare-default; gx v0.3.1 regression test present.
 
 ## Alternatives Considered
 

@@ -102,10 +102,14 @@ link to hand-edit.
 - **Tagging**: only via `/shipit`/`bump`, only on `main`, annotated, single flat `v*` tag for the
   whole workspace — never per-crate tags.
 
-## Bare-Worktree Layout (clone's default)
+## Bare-Worktree Layout (`clone --bare` opt-in)
 
-`clone org/repo` produces a **bare container + nested worktrees**, not a flat
-checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
+`clone org/repo` produces a **flat checkout** by default. With `--bare` it
+produces a **bare container + nested worktrees** instead — the layout described
+here, an explicit opt-in for the handful of repos where multiple agents work
+branches in parallel. Designs: `docs/design/2026-06-21-clone-bare-worktree.md`
+(the layout) and `docs/design/2026-07-03-clone-flat-default.md` (the flat-default
+flip + `--flatten` collapse).
 
 ```
 ~/repos/<org>/<repo>/        # the container (the "logical repo")
@@ -128,8 +132,10 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
   reverts to the home identity - never do it. Locked by a unit test
   (`clone/src/bare/tests.rs::test_persona_invariant_under_org_prefix`).
 - **Commands:**
-  - `clone org/repo` - bare container + default worktree, `cd` into it.
-  - `clone --flat org/repo` - legacy single checkout (`--versioning` implies it).
+  - `clone org/repo` - flat checkout (the default), `cd` into it.
+  - `clone --bare org/repo` - bare container + default worktree, `cd` into it.
+  - `clone --flat org/repo` - redundant no-op alias for the default (`--versioning`
+    implies flat).
   - Worktree create/switch/list/prune moved OUT of `clone` into the `worktree`
     tool (`worktree <branch>` / `worktree` picker / `worktree --list` /
     `worktree --prune`). `clone` no longer has `--worktree`.
@@ -145,11 +151,22 @@ checkout. Design: `docs/design/2026-06-21-clone-bare-worktree.md`.
     recoverably, repairs worktree links. Bails before mutating on a mid-merge
     tree. Git-ignored files (`.env`) are listed, not carried (recoverable from the
     `rkvr`'d backup); a `target` symlink is noted, not recreated.
+  - `clone --flatten [org/repo]` - the reverse: collapse a bare container back to
+    a flat checkout. With no repospec, flattens the container you're standing in.
+    Refuse-first - it BLOCKS on any unsafe/unmergeable worktree state (uncommitted
+    changes, an unmerged/unpushed local branch, a detached HEAD unreachable from a
+    ref, an existing stash, an in-progress merge/rebase/cherry-pick/revert/bisect,
+    per-worktree config or sparse-checkout, dirty submodules) and on any check that
+    cannot be determined (fail-closed). Preserves every `refs/*` at an identical
+    OID; archives the whole container via `rkvr` before a copy-then-atomic-swap, so
+    a removed worktree's git-ignored files stay recoverable. `--flatten --dry-run`
+    previews without changing anything.
 - **Existing flat clones** are untouched until `--migrate`d; `clone org/repo` on
-  one updates it in place and prints a `--migrate` hint (mixed ecosystem is
-  supported). Discovery (`common::RepoDiscovery`) recognizes both shapes.
+  one updates it in place. A `clone --bare` on an existing flat clone updates it
+  in place and prints a `--migrate` hint (mixed ecosystem is supported).
+  Discovery (`common::RepoDiscovery`) recognizes both shapes.
 - **`clone.cfg` `[clone] default-layout = bare|flat`** sets the per-machine
-  default (CLI `--flat` overrides it; built-in default is `bare`).
+  default (CLI `--bare`/`--flat` overrides it; built-in default is `flat`).
 - **No `cd` navigation magic** (the binary-emitted wrappers, see Install & Wiring):
   both wrappers use the
   same contract - the binary prints a destination path to stdout, the shell

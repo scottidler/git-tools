@@ -112,6 +112,30 @@ Repo: git-tools. Commit: `a8414dc`. CI: green (`otto ci` exit 0; new suite 3/3 p
 
 ---
 
+## Phase 4: Post-implementation audit remediation
+
+Repo: git-tools. CI: green (`otto ci` exit 0, all new tests pass). The gx item
+(`gx clone` bare-container update) had already shipped as gx v0.3.1 before this
+phase; only the git-tools items were open.
+
+### Design decisions
+- **Fail-closed via refusal push, not a new error path.** The three warn-and-continue arms in `flatten::inspect` (`is_dirty` Err, `worktree_gitdir` Err, `dirty_submodules` Err) now `refusals.push(...)` a `fail-closed` reason instead of `warn!`-and-skipping. This keeps a single decision channel (`Inspection::refusals`) that both the real run and `--dry-run` share — an undeterminable check reads exactly like a determinable unsafe one. `clone/src/flatten.rs::inspect`.
+- **`dirty_submodules` bails on non-success rather than the caller special-casing it.** Since a repo with no submodules exits 0 with empty output (verified empirically), a non-success `git submodule status` is a genuine error, not "clean". Made `dirty_submodules` `bail!` on `!status.success()`; the caller's existing `Err` arm then produces the refusal — one place to fail closed, and the function's contract ("Ok = determinable") is honest. `clone/src/flatten.rs::dirty_submodules`.
+
+### Deviations
+- None. All three HIGH sub-items, all four MEDIUM test additions, and the LOW doc-drift fix were implemented as specified.
+
+### Tradeoffs
+- **Fail-closed test fixture = a removed linked-worktree directory** (admin entry retained, working dir gone) rather than mocking each check. One real fixture makes `is_dirty`/`worktree_gitdir`/`dirty_submodules` all error at once (their git invocations run in a nonexistent cwd), so `test_inspect_refuses_when_safety_check_errors` asserts all three fail-closed refusals from a single setup — closer to a real corruption than three separate mocks.
+- **Dirty-submodule / cherry-pick tests fire multiple refusals.** Advancing a submodule's HEAD also makes the superproject dirty (` M sub`), and a conflicted cherry-pick also makes the tree dirty; both fixtures therefore trip `is_dirty` in addition to the targeted check. The tests assert the *specific* refusal substring ("submodule", "in-progress cherry-pick"), so the overlap is harmless and the fixtures stay realistic.
+- **Ignored-file-to-stderr asserted at the binary level via `--flatten --dry-run`.** `report_ignored` uses `warn!` (log target) and `flatten`/`dry_run` use `eprintln!`; a library-level test can't easily capture process stderr, so the assertion lives in `lifecycle_tests.rs` capturing the built binary's stderr — which also proves the wiring end to end.
+- **migrate->flatten local-only-branch test drives the real `--migrate`.** The existing round-trip seeds via `--bare`, which cannot catch a ref dropped by the forward migration. The new test creates a local-only branch (a ref with no worktree, so `--flatten`'s per-worktree ancestry check never touches it) and asserts its OID survives flat->bare->flat — exercising the retention proof against a ref that only the bare-clone-from-local carries.
+
+### Open questions
+- None.
+
+---
+
 ## Cross-repo summary
 
 Two repos, five phases, all `otto ci` green and independently re-verified by the orchestrator:
@@ -123,5 +147,7 @@ Two repos, five phases, all `otto ci` green and independently re-verified by the
 | 1 flat default + `--bare` | git-tools | `c5cbd33` |
 | 2 `--flatten` collapse | git-tools | `2fa080a` |
 | 3 e2e lifecycle | git-tools | `a8414dc` |
+| 4 audit remediation (git-tools) | git-tools | this commit |
+| 4 audit remediation (gx) | gx | `18c9b55`+ (shipped v0.3.1) |
 
 **Follow-up owned by the user:** update the `clone` skill doc at `~/repos/scottidler/claude/HOME/.claude/skills/clone/SKILL.md` (separate `scottidler/claude` repo) for the new flat-by-default behavior; it still documents bare-by-default.
