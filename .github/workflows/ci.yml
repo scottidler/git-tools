@@ -38,9 +38,6 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Install rkvr (worktree migrate/flatten fail closed without it)
-        run: cargo install --git https://github.com/scottidler/rkvr rkvr
-
       - name: Run tests
         run: cargo test --workspace --verbose
 
