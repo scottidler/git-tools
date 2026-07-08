@@ -150,6 +150,77 @@ Design doc: `docs/design/2026-07-07-clone-worktree-split.md`
 ### Open questions
 - None.
 
+## Phase 4: Shell-init cd-on-init for worktree verbs
+
+### Design decisions
+- Confirmed (did not change) that `init`/`migrate`/`flatten` already land in the
+  `worktree()` wrapper's capture-and-`cd` branch — `worktree/src/shell.rs`'s
+  `case "$1" in -*|shell-init) ... ; *) ...cd... ;; esac` — because the three
+  verbs are non-`-*` `argv[1]` tokens (pre-clap dispatched in
+  `worktree/src/main.rs`), the existing blanket `*)` arm already routes them
+  through capture-and-cd with zero wrapper changes needed; this phase adds
+  coverage (`tests/shell-functions.zsh`) rather than code here.
+- Added `Outcome::Previewed(PathBuf)` — `worktree/src/lib.rs::Outcome`,
+  `worktree/src/lib.rs::run` (the `Op::Migrate`/`Op::Flatten` arms) — a new
+  variant distinct from `Outcome::Switched`, returned only when `config.dry_run`
+  is true. `worktree/src/main.rs::dispatch` matches it with an empty arm (`Outcome::
+  Previewed(_path) => {}`), so `--dry-run` prints NOTHING to stdout. This is the
+  correct seam: `migrate::dry_run`/`flatten::dry_run` (`worktree/src/migrate.rs`,
+  `worktree/src/flatten.rs`) already wrote their human-readable preview to stderr
+  via `eprintln!` since Phase 2 — the only bug was `main.rs` echoing the returned
+  path to stdout for EVERY `Outcome::Switched`, dry-run included. Fixing the
+  print boundary (not the `dry_run` functions' return values, which unit tests in
+  `worktree/src/migrate/tests.rs`/`worktree/src/flatten/tests.rs` already assert
+  equal the target path) is the minimal, correct-seam fix.
+- Extended `tests/shell-functions.zsh` with a new "worktree() acquisition verbs"
+  section: cd-on-`init`/`migrate`/`flatten` cases (stub returns a real dir, rc 0
+  -> `$PWD` becomes `$dest`), an `init` non-zero-exit case (bail before cd, same
+  contract as the branch form), and dry-run no-cd cases for both `migrate
+  --dry-run` and `flatten --dry-run` (stub returns EMPTY stdout with rc 0 ->
+  the wrapper's existing `[[ -z "$dest" ]]` guard fires, returns 1, stays in
+  `$home`). Matches the existing stub-harness pattern (`STUB_OUT`/`STUB_RC` env
+  vars, `builtin cd`/`check` helpers) rather than inventing a new harness.
+- Extended `worktree/tests/lifecycle_tests.rs::test_e2e_flatten_dry_run_makes_no_changes`
+  (an existing e2e test driving the BUILT BINARY, not the shell wrapper) with two
+  new assertions: `dry.stdout.is_empty()` and `dry.stderr` contains `"DRY RUN"` —
+  this locks the binary's own stdout/stderr contract independently of the shell
+  wrapper, so a future regression is caught even if someone tests the binary
+  directly without `eval`-ing the emitted function.
+
+### Deviations
+- None. The phase's file list (shell.rs unchanged, lib.rs/main.rs for the
+  dry-run fix, tests/shell-functions.zsh for coverage) was followed exactly;
+  the one seam correction (fixing `main.rs`'s print boundary via a new `Outcome`
+  variant, rather than touching `migrate.rs`/`flatten.rs`'s `dry_run` return
+  values) is "same effect, correct seam", not a deviation from the doc's intent
+  — the doc's own diagnosis text ("flatten.rs ... currently return the
+  container/target path on dry-run ... which would otherwise cd you to the
+  container root") identifies the RETURNED PATH reaching the wrapper as the bug,
+  and `Outcome::Previewed` severs exactly that path from stdout without
+  requiring `dry_run` to lie about what it did (it still returns the
+  would-be target, useful to a future caller or test).
+
+### Tradeoffs
+- A new `Outcome::Previewed` variant vs. reusing `Outcome::Switched` with a
+  `bool` flag or an `Option<PathBuf>` — chose the distinct variant because
+  `Outcome` is matched exhaustively in exactly one place (`main.rs::dispatch`),
+  a `Previewed` variant self-documents "dry-run, print nothing" at the type
+  level (searchable, can't be silently defaulted the wrong way in a future
+  match arm), and it costs nothing since nothing outside `lib.rs`/`main.rs`
+  matches on `Outcome::Switched` today (confirmed via grep, cited above).
+- Extended the existing `test_e2e_flatten_dry_run_makes_no_changes` in place
+  rather than adding a fresh `test_e2e_migrate_dry_run_stdout_is_empty` for
+  symmetry — `worktree migrate --dry-run`'s underlying `dry_run` function
+  already has dedicated unit coverage (`worktree/src/migrate/tests.rs::
+  test_dry_run_makes_no_changes`), and the phase's shell-functions.zsh coverage
+  exercises `migrate --dry-run` and `flatten --dry-run` identically at the
+  wrapper level; a second binary-level e2e test for `migrate` would duplicate
+  the `flatten` one without adding a new assertion class, so it was left out to
+  avoid gold-plating this phase.
+
+### Open questions
+- None.
+
 ## Phase 2: Relocate bare/migrate/flatten into worktree + add verbs
 
 ### Design decisions

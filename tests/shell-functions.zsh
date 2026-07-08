@@ -208,6 +208,52 @@ STUB_OUT=$dest STUB_RC=0 STUB_ARGV_FILE=$argv_file worktree "New Feature"
 check "worktree 'New Feature' -> binary got 1 arg"        "1"           "$(sed -n 1p "$argv_file")"
 check "worktree 'New Feature' -> arg preserved verbatim"  "New Feature" "$(sed -n 2p "$argv_file")"
 
+# --- worktree() acquisition verbs (init/migrate/flatten) --------------------
+# `init`/`migrate`/`flatten` are non-`-*` `argv[1]` tokens (reserved-word
+# positionals, pre-clap dispatched in `worktree/src/main.rs`), so they must land
+# in the SAME capture-and-cd branch as a bare branch name or the no-arg picker -
+# never the `-*` passthrough. The stub doesn't care what the verb means; it only
+# proves the wrapper's dispatch takes the cd path for these tokens.
+
+# `worktree init <spec>` -> cd into the printed default worktree.
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 worktree init org/repo
+check "worktree init -> cd into printed default worktree" "$dest" "$PWD"
+
+# `worktree migrate [spec]` -> cd into the printed path.
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 worktree migrate org/repo
+check "worktree migrate -> cd into printed path" "$dest" "$PWD"
+
+# `worktree flatten [spec]` -> cd into the printed path.
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 worktree flatten org/repo
+check "worktree flatten -> cd into printed path" "$dest" "$PWD"
+
+# `worktree init`/`migrate`/`flatten`, binary fails -> bail before cd, non-zero
+# (same failure contract as the branch/picker forms).
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=1 worktree init org/repo 2>/dev/null
+rc=$?
+check "worktree init non-zero -> returns non-zero" "1" "$rc"
+check "worktree init non-zero -> did NOT cd"       "$home" "$PWD"
+
+# `worktree migrate --dry-run` / `worktree flatten --dry-run`: per Phase 4, the
+# binary prints its preview to STDERR ONLY and leaves stdout empty (worktree's
+# `dry_run` -> `Outcome::Previewed`, never printed by main.rs), so the wrapper's
+# existing empty-output guard bails BEFORE any cd, leaving the user in $PWD.
+builtin cd "$home"
+STUB_OUT="" STUB_RC=0 worktree migrate --dry-run org/repo 2>/dev/null
+rc=$?
+check "worktree migrate --dry-run -> wrapper returns non-zero" "1"     "$rc"
+check "worktree migrate --dry-run -> did NOT cd (stayed put)" "$home" "$PWD"
+
+builtin cd "$home"
+STUB_OUT="" STUB_RC=0 worktree flatten --dry-run org/repo 2>/dev/null
+rc=$?
+check "worktree flatten --dry-run -> wrapper returns non-zero" "1"     "$rc"
+check "worktree flatten --dry-run -> did NOT cd (stayed put)" "$home" "$PWD"
+
 # --- result ------------------------------------------------------------------
 if (( fails )); then
     print -u2 -- "\n$fails test(s) failed"

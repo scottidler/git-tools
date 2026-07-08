@@ -52,12 +52,16 @@ fn main() -> Result<()> {
 }
 
 /// Run the resolved config and emit its outcome (path to stdout for `cd`, table
-/// to stdout for a list, count to stderr for a prune).
+/// to stdout for a list, count to stderr for a prune). A `--dry-run` preview
+/// prints NOTHING to stdout: `migrate::dry_run`/`flatten::dry_run` already wrote
+/// the human-readable plan to stderr, and stdout must stay empty so the
+/// `worktree()` wrapper's empty-output guard bails before any `cd`.
 fn dispatch(config: Config) -> Result<()> {
     match run(config)? {
         Outcome::Switched(path) => println!("{}", path.display()),
         Outcome::Listed(entries) => print_entries(&entries),
         Outcome::Pruned(removed) => eprintln!("worktree: removed {} worktree(s)", removed.len()),
+        Outcome::Previewed(_path) => {}
     }
     Ok(())
 }

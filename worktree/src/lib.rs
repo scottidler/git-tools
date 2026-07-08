@@ -35,6 +35,12 @@ pub enum Outcome {
     /// The worktree paths `--prune` removed (user-facing reporting happens in
     /// `prune`; these are returned for the final count).
     Pruned(Vec<std::path::PathBuf>),
+    /// A `migrate`/`flatten` `--dry-run` preview. The human-readable plan was
+    /// already written to stderr by `migrate::dry_run`/`flatten::dry_run`; the
+    /// path is carried for callers/tests that want it, but `main.rs` prints
+    /// NOTHING for this variant so stdout stays empty and the `worktree()`
+    /// wrapper's empty-output guard (`shell.rs`) short-circuits before any `cd`.
+    Previewed(std::path::PathBuf),
 }
 
 /// Perform the requested operation.
@@ -56,11 +62,11 @@ pub fn run(config: Config) -> Result<Outcome> {
                 Some(spec) => config.clonepath.join(spec.to_string()),
                 None => migrate::flat_from_cwd()?,
             };
-            let path = if config.dry_run {
-                migrate::dry_run(&flat, config.default_branch.as_deref())?
-            } else {
-                migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())?
-            };
+            if config.dry_run {
+                let path = migrate::dry_run(&flat, config.default_branch.as_deref())?;
+                return Ok(Outcome::Previewed(path));
+            }
+            let path = migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())?;
             Ok(Outcome::Switched(path))
         }
         Op::Flatten(spec) => {
@@ -70,11 +76,11 @@ pub fn run(config: Config) -> Result<Outcome> {
                 Some(spec) => config.clonepath.join(spec.to_string()),
                 None => flatten::container_from_cwd()?,
             };
-            let path = if config.dry_run {
-                flatten::dry_run(&container, config.default_branch.as_deref())?
-            } else {
-                flatten::flatten(&container, config.default_branch.as_deref())?
-            };
+            if config.dry_run {
+                let path = flatten::dry_run(&container, config.default_branch.as_deref())?;
+                return Ok(Outcome::Previewed(path));
+            }
+            let path = flatten::flatten(&container, config.default_branch.as_deref())?;
             Ok(Outcome::Switched(path))
         }
         _ => run_local(config),

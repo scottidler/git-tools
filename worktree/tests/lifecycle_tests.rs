@@ -386,6 +386,15 @@ fn test_e2e_flatten_dry_run_makes_no_changes() {
         "flatten --dry-run should succeed: {}",
         String::from_utf8_lossy(&dry.stderr)
     );
+    assert!(
+        dry.stdout.is_empty(),
+        "flatten --dry-run must leave stdout empty (so the wrapper never cd's); got: {:?}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("DRY RUN"),
+        "flatten --dry-run must print its preview to stderr"
+    );
 
     // Nothing changed: still a bare container, no staging/backup leftovers.
     assert!(
