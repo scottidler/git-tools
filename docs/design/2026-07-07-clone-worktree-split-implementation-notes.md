@@ -306,3 +306,111 @@ Design doc: `docs/design/2026-07-07-clone-worktree-split.md`
 
 ### Open questions
 - None.
+
+## Phase 5: Config YAML migration + docs true-up
+
+### Design decisions
+- Rewrote `common::config` YAML-primary with a fail-closed loader —
+  `common/src/config.rs::{Config, OrgConfig, candidates, load}` — `Config`
+  carries `default_branch: Option<String>` and `orgs: HashMap<String,
+  OrgConfig>` (each `OrgConfig` carries `sshkey: Option<String>`), both
+  `#[serde(rename_all = "kebab-case", deny_unknown_fields)]` per the doc's Data
+  Model. `candidates()` returns the four locations in precedence order
+  (`$GIT_TOOLS_CFG` YAML, XDG `git-tools/git-tools.yml` YAML, `$CLONE_CFG` INI,
+  `~/.config/clone/clone.cfg` INI); `load()` walks them, returns `Ok(None)`
+  when no location has a present file, and bails loudly the instant a present
+  file fails to parse — no location past a broken one is ever consulted.
+- Renamed the public lookup API from the old generic `clone_cfg_value(key)` to
+  `default_branch() -> Result<Option<String>>` — `common/src/config.rs` — the
+  new struct only ever needs one scalar field, so a typed accessor is the
+  literal name for what it does; the string-keyed API stopped meaning anything
+  once the backing store was no longer an arbitrary INI section. `find_ssh_key_
+  for_org(repospec) -> Result<Option<String>>` keeps its exact old name/
+  signature since it was already the correct, literal name.
+- Added `common::config::xdg_config_dir()` — the house XDG-honoring helper
+  (`$XDG_CONFIG_HOME` else `dirs::home_dir().join(".config")`) did not
+  previously exist in `common` (only a private copy lived in
+  `ls-owners/src/main.rs`); this phase gives `common::config` its own copy
+  rather than reaching into `ls-owners`, since promoting a binary-private `fn`
+  out of an unrelated crate is out of this phase's scope. `cargo add dirs` to
+  `common` (already a transitive dep of the workspace via `ls-owners`, so no
+  new crate enters the dependency graph, just a new direct edge).
+- INI fallback (`parse_ini`) is a straight re-implementation of the old
+  `find_ssh_key_for_org`/`clone_cfg_value` section-scanning logic against
+  `ini!(safe path)` (the panic-free variant) instead of the panicking `ini!`
+  macro used before — `common/src/config.rs::parse_ini` — a malformed INI file
+  now surfaces as an `eyre` `Err` through the same fail-closed path as a
+  malformed YAML file, rather than either panicking (old `ini!`) or returning
+  a generic "Failed to load configuration file" that masked which location was
+  broken.
+- Updated both call sites: `worktree/src/config.rs`'s three
+  `TryFrom<{Init,Migrate,Flatten}Cli>` impls swap `common::config::
+  clone_cfg_value("default")` for `common::config::default_branch()?` (three
+  call sites, `worktree/src/config.rs`); `clone/src/config.rs` needed no call
+  change (`find_ssh_key_for_org` kept its signature), only a doc-comment
+  update pointing at the new config path.
+- Shipped `git-tools.yml.example` at the repo root (`/git-tools.yml.example`)
+  per the house "one annotated example" rule, showing `default-branch` plus a
+  `tatari-tv` and `default` `orgs` entry, matching the Data Model's YAML
+  fixture exactly.
+- Rewrote the `CLAUDE.md` Workspace Structure, Bare-Worktree Layout, module
+  map, and Common Crate Modules sections to describe shipped Phase 1-5
+  reality: `clone --bare/--migrate/--flatten` are gone (unknown-argument
+  errors); `worktree init/migrate/flatten` are the only entry points into the
+  bare lifecycle; the module map lists `clone/src/{cli,config,shell}.rs` (no
+  `bare`/`migrate`/`flatten`/`transport`) and `worktree/src/{cli,config,bare,
+  init,migrate,flatten,switch,list,prune,pick,shell}.rs`; the config section
+  documents the YAML-primary path and INI fallback. Also corrected two stale
+  `bare::add_worktree`/`bare::resolve_and_add` bullets in Common Crate Modules
+  that still said "shared by `clone` and `worktree`" — confirmed via grep that
+  `common::bare` has had zero callers in `clone/src` since Phase 3, so the
+  claim was already false before this phase touched it; fixed while in the
+  neighborhood of "make CLAUDE.md track shipped reality."
+- `clone --help`/`worktree --help`/`worktree init|migrate|flatten --help`
+  needed NO wording changes — verified by running each binary's built
+  `--help`: none mention `default-layout` or the removed flags, and all
+  already describe `worktree init`/`migrate`/`flatten` (Phase 2/3 already
+  wrote them correctly). The task's after-help true-up bullet is satisfied by
+  confirming this, not by editing text that was already accurate.
+
+### Deviations
+- The doc's Phase 5 bullet says "flip this doc's Status to Implemented" — NOT
+  done here per the per-phase-implementer contract (the orchestrator owns
+  status flip + finalization after verifying all phases); the design doc
+  itself is also intentionally left uncommitted by this phase.
+- `default_branch()`'s signature changed from `Option<String>` (old
+  `clone_cfg_value`) to `Result<Option<String>>` — same effect, correct seam:
+  the doc's fail-closed semantics ("a malformed higher-precedence file is a
+  loud error") apply to the whole config load, not just the SSH-key lookup, so
+  a parse failure must propagate through every accessor, not just
+  `find_ssh_key_for_org`. The three call sites already returned `Result`, so
+  `?` was a one-line change per site.
+
+### Tradeoffs
+- One shared `load()` that returns the whole `Config` (called once per
+  accessor invocation) vs. a process-wide memoized/cached config — chose the
+  uncached form: `default_branch()` and `find_ssh_key_for_org()` are each
+  called at most a handful of times per CLI invocation (never in a loop), so
+  re-reading and re-parsing a small config file on each call is immaterial,
+  and avoiding a `OnceLock`/cache sidesteps any staleness question in tests
+  that mutate env vars and file contents between assertions within the same
+  process.
+- Kept the INI section-scanning (`org.<name>` prefix stripping, `[clone]
+  default` lookup) hand-rolled in `parse_ini` rather than trying to shoehorn
+  the legacy INI shape through `serde` — the `ini` crate's macro returns a
+  bare `HashMap<String, HashMap<String, Option<String>>>`, not something
+  `serde_yaml`/`serde`-compatible, and the legacy format's `org.<name>`
+  dotted-section-name encoding has no clean 1:1 mapping to the new nested
+  `orgs.<name>.sshkey` struct shape anyway; a manual translation is the
+  correct, minimal seam.
+- Wrote the fail-closed bite test (`test_malformed_higher_precedence_file_is_
+  loud_error_not_fallthrough`) as a positive assertion (`result.is_err()`)
+  proven to bite by manually reverting `load()`'s `wrap_err_with(...)?` to a
+  `continue`-on-error loop, re-running just that test, confirming it failed,
+  then restoring the correct code — rather than leaving a permanent
+  parameterized "break this on purpose" harness in the test file, since the
+  latter would require production code to expose a test-only toggle for
+  fall-through behavior that should never exist as a reachable code path.
+
+### Open questions
+- None.

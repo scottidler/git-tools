@@ -20,7 +20,9 @@ pub enum Op {
 /// Validated, resolved configuration consumed by [`crate::run`].
 ///
 /// `Cli` is parsing only; `Config` carries the parsed `RepoSpec`, expanded
-/// paths, the operation, and the per-org SSH key resolved from `clone.cfg`.
+/// paths, the operation, and the per-org SSH key resolved from the shared
+/// config (`~/.config/git-tools/git-tools.yml`, falling back to the legacy
+/// `clone.cfg` INI).
 #[derive(Debug)]
 pub struct Config {
     pub spec: Option<RepoSpec>,

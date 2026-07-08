@@ -99,7 +99,7 @@ impl TryFrom<InitCli> for Config {
         let spec = git::parse_repospec(&cli.spec)
             .map_err(|e| eyre::eyre!("Failed to parse repository specification '{}': {}", cli.spec, e))?;
         let ssh_key = common::config::find_ssh_key_for_org(&spec.org)?.map(PathBuf::from);
-        let default_branch = common::config::clone_cfg_value("default");
+        let default_branch = common::config::default_branch()?;
         Ok(Self {
             op: Op::Init(spec),
             default_branch,
@@ -119,7 +119,7 @@ impl TryFrom<MigrateCli> for Config {
 
     fn try_from(cli: MigrateCli) -> Result<Self> {
         let spec = parse_optional_spec(cli.spec.as_deref())?;
-        let default_branch = common::config::clone_cfg_value("default");
+        let default_branch = common::config::default_branch()?;
         Ok(Self {
             op: Op::Migrate(spec),
             default_branch,
@@ -139,7 +139,7 @@ impl TryFrom<FlattenCli> for Config {
 
     fn try_from(cli: FlattenCli) -> Result<Self> {
         let spec = parse_optional_spec(cli.spec.as_deref())?;
-        let default_branch = common::config::clone_cfg_value("default");
+        let default_branch = common::config::default_branch()?;
         Ok(Self {
             op: Op::Flatten(spec),
             default_branch,
