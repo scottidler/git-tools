@@ -246,7 +246,12 @@ fn test_migrate_bails_on_unmerged_tree() {
     commit(&flat, "main");
     // --no-ff forces the 3-way merge attempt regardless of a `merge.ff=only`
     // git config, so the conflict (and unmerged paths) actually materialize.
-    let merge = git::output(&["merge", "--no-ff", "x"], Some(&flat), None).unwrap();
+    let merge = git::output(
+        &["-c", "user.email=t@e.com", "-c", "user.name=t", "merge", "--no-ff", "x"],
+        Some(&flat),
+        None,
+    )
+    .unwrap();
     assert!(!merge.status.success(), "merge should conflict (test setup)");
 
     let err = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap_err();
