@@ -9,7 +9,10 @@
 pub mod bare;
 pub mod cli;
 pub mod config;
+pub mod flatten;
+pub mod init;
 pub mod list;
+pub mod migrate;
 pub mod pick;
 pub mod prune;
 pub mod shell;
@@ -34,14 +37,59 @@ pub enum Outcome {
     Pruned(Vec<std::path::PathBuf>),
 }
 
-/// Resolve the enclosing bare container and perform the requested operation.
+/// Perform the requested operation.
+///
+/// The acquisition/conversion verbs (`init`, and explicit-spec `migrate`/
+/// `flatten`) run from ANY cwd: they address their target by spec, so they do
+/// NOT resolve an enclosing container. Only the local day-2 ops (`switch`/`list`/
+/// `prune`/`pick`) and the no-spec `migrate`/`flatten` forms resolve the bare
+/// container from the current directory. The cwd resolution therefore lives
+/// inside the local-op arm, not at the top of `run`.
 pub fn run(config: Config) -> Result<Outcome> {
+    debug!("run: op={:?}", config.op);
+    match &config.op {
+        Op::Init(spec) => Ok(Outcome::Switched(init::init(&config, spec)?)),
+        Op::Migrate(spec) => {
+            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no spec,
+            // migrate the flat checkout the user is standing in.
+            let flat = match spec {
+                Some(spec) => config.clonepath.join(spec.to_string()),
+                None => migrate::flat_from_cwd()?,
+            };
+            let path = if config.dry_run {
+                migrate::dry_run(&flat, config.default_branch.as_deref())?
+            } else {
+                migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())?
+            };
+            Ok(Outcome::Switched(path))
+        }
+        Op::Flatten(spec) => {
+            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no spec,
+            // flatten the container the user is standing in.
+            let container = match spec {
+                Some(spec) => config.clonepath.join(spec.to_string()),
+                None => flatten::container_from_cwd()?,
+            };
+            let path = if config.dry_run {
+                flatten::dry_run(&container, config.default_branch.as_deref())?
+            } else {
+                flatten::flatten(&container, config.default_branch.as_deref())?
+            };
+            Ok(Outcome::Switched(path))
+        }
+        _ => run_local(config),
+    }
+}
+
+/// The day-2 worktree ops that require an enclosing bare container resolved from
+/// the current directory (`switch`/`list`/`prune`/`pick`).
+fn run_local(config: Config) -> Result<Outcome> {
     let container = bare::resolve_container_from_cwd()?;
-    debug!("run: container={:?} op={:?}", container, config.op);
+    debug!("run_local: container={:?} op={:?}", container, config.op);
 
     if !bare::is_bare_container(&container) {
         bail!(
-            "'{}' is not a bare container; worktree requires the bare layout (run `clone --migrate` first)",
+            "'{}' is not a bare container; worktree requires the bare layout (run `worktree migrate` first)",
             container.display()
         );
     }
@@ -56,6 +104,10 @@ pub fn run(config: Config) -> Result<Outcome> {
         Op::Switch(branch) => {
             let path = switch::switch(&container, &branch, config.default_branch.as_deref())?;
             Ok(Outcome::Switched(path))
+        }
+        // Init/Migrate/Flatten are dispatched in `run` before reaching here.
+        Op::Init(_) | Op::Migrate(_) | Op::Flatten(_) => {
+            unreachable!("acquisition verbs are dispatched in run(), never run_local()")
         }
     }
 }
