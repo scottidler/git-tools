@@ -2,61 +2,36 @@
 
 use std::path::PathBuf;
 
-use common::config::{clone_cfg_value, find_ssh_key_for_org};
+use common::config::find_ssh_key_for_org;
 use common::git::{self, RepoSpec};
 use eyre::{Result, WrapErr, eyre};
-use log::debug;
 
 use crate::cli::Cli;
 
-/// On-disk repository layout `clone` produces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
-    /// Bare container (`.bare/` + `.git` pointer + nested worktrees). Opt-in
-    /// via `--bare` or `[clone] default-layout = bare` in `clone.cfg`.
-    Bare,
-    /// Single checkout, no worktrees. Default.
-    Flat,
-}
-
-/// The operation `clone` performs this invocation.
+/// The operation `clone` performs this invocation. Always a flat checkout;
+/// bare-container acquisition and layout conversion live on `worktree`
+/// (`init`/`migrate`/`flatten`), not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// Clone (or update) a repository. Requires `spec`.
     Clone,
-    /// Convert an existing flat checkout into a bare container. `spec` is
-    /// optional (derived from the current directory's enclosing repo when
-    /// absent).
-    Migrate,
-    /// Collapse an existing bare container back into a flat checkout. `spec` is
-    /// optional (derived from the current directory's enclosing container when
-    /// absent). Refuses on any unsafe/unmergeable worktree state.
-    Flatten,
 }
 
 /// Validated, resolved configuration consumed by [`crate::run`].
 ///
 /// `Cli` is parsing only; `Config` carries the parsed `RepoSpec`, expanded
-/// paths, the resolved layout + operation, and the per-org SSH key resolved
-/// from `clone.cfg`.
+/// paths, the operation, and the per-org SSH key resolved from `clone.cfg`.
 #[derive(Debug)]
 pub struct Config {
-    /// `None` only for `--migrate` run inside a checkout (no `org/repo` arg).
     pub spec: Option<RepoSpec>,
     pub op: Op,
-    pub layout: Layout,
     pub revision: String,
     pub remote: String,
     pub clonepath: PathBuf,
     pub mirrorpath: Option<PathBuf>,
     pub versioning: bool,
     pub verbose: bool,
-    /// With `Op::Migrate`, preview the plan without changing anything.
-    pub dry_run: bool,
     pub ssh_key: Option<PathBuf>,
-    /// Last-resort default branch from `clone.cfg` `[clone] default`, used only
-    /// when the remote does not advertise a default branch.
-    pub default_branch: Option<String>,
 }
 
 impl TryFrom<Cli> for Config {
@@ -70,108 +45,28 @@ impl TryFrom<Cli> for Config {
             None => None,
         };
 
-        // --migrate and --flatten are opposite structural conversions; naming
-        // both is contradictory, so reject it before deriving the op (a silent
-        // precedence would run one and ignore the other).
-        if cli.migrate && cli.flatten {
-            return Err(eyre!("--migrate and --flatten cannot be combined"));
-        }
-
-        let op = if cli.migrate {
-            Op::Migrate
-        } else if cli.flatten {
-            Op::Flatten
-        } else {
-            Op::Clone
-        };
-
-        // Validation: only clone needs a repospec; --migrate/--flatten can derive
-        // their target from the current directory, so a repospec is optional there.
-        if matches!(op, Op::Clone) && spec.is_none() {
+        // clone always needs a repospec now: the no-repospec forms (bare-cwd
+        // `--migrate`/`--flatten`) moved to `worktree migrate`/`worktree flatten`.
+        if spec.is_none() {
             return Err(eyre!("a repository specification (org/repo or a URL) is required"));
-        }
-
-        // --flat (explicit, or implied by --versioning) selects the flat
-        // layout, which has nothing to migrate to.
-        if (cli.flat || cli.versioning) && matches!(op, Op::Migrate) {
-            return Err(eyre!("--flat/--versioning cannot be combined with --migrate"));
-        }
-
-        // --bare and --flat/--versioning both name a layout; only one wins.
-        if cli.bare && (cli.flat || cli.versioning) {
-            return Err(eyre!("--bare cannot be combined with --flat/--versioning"));
-        }
-
-        // --migrate always produces a bare container; --bare is redundant there.
-        if cli.bare && matches!(op, Op::Migrate) {
-            return Err(eyre!("--bare cannot be combined with --migrate"));
-        }
-
-        // --flatten produces a flat checkout; a bare/versioning layout request is
-        // contradictory there.
-        if cli.bare && matches!(op, Op::Flatten) {
-            return Err(eyre!("--bare cannot be combined with --flatten"));
-        }
-        if cli.versioning && matches!(op, Op::Flatten) {
-            return Err(eyre!("--versioning cannot be combined with --flatten"));
-        }
-
-        // --dry-run only previews a structural conversion (migrate/flatten); it is
-        // meaningless for a plain clone.
-        if cli.dry_run && matches!(op, Op::Clone) {
-            return Err(eyre!("--dry-run is only valid with --migrate or --flatten"));
         }
 
         let ssh_key = match &spec {
             Some(spec) => find_ssh_key_for_org(&spec.org)?.map(PathBuf::from),
             None => None,
         };
-        let layout = resolve_layout(
-            cli.bare,
-            cli.flat,
-            cli.versioning,
-            clone_cfg_value("default-layout").as_deref(),
-        );
-        let default_branch = clone_cfg_value("default");
 
         Ok(Self {
             spec,
-            op,
-            layout,
+            op: Op::Clone,
             revision: cli.revision,
             remote: cli.remote,
             clonepath: PathBuf::from(cli.clonepath),
             mirrorpath: cli.mirrorpath.map(PathBuf::from),
             versioning: cli.versioning,
             verbose: cli.verbose,
-            dry_run: cli.dry_run,
             ssh_key,
-            default_branch,
         })
-    }
-}
-
-/// Resolve the layout: CLI `--bare`/`--flat` (or `--versioning`, which implies
-/// flat) > `clone.cfg` `[clone] default-layout` > built-in default (`Flat`).
-///
-/// `Config::try_from` already rejects `--bare` combined with `--flat`/
-/// `--versioning`, so the flag checks below are mutually exclusive in
-/// practice; the flat checks run first only as a defensive ordering for
-/// direct callers (e.g. tests) that bypass that validation.
-fn resolve_layout(bare_flag: bool, flat_flag: bool, versioning: bool, cfg_layout: Option<&str>) -> Layout {
-    debug!(
-        "resolve_layout: bare_flag={} flat_flag={} versioning={} cfg_layout={:?}",
-        bare_flag, flat_flag, versioning, cfg_layout
-    );
-    if flat_flag || versioning {
-        return Layout::Flat;
-    }
-    if bare_flag {
-        return Layout::Bare;
-    }
-    match cfg_layout {
-        Some(s) if s.eq_ignore_ascii_case("bare") => Layout::Bare,
-        _ => Layout::Flat,
     }
 }
 

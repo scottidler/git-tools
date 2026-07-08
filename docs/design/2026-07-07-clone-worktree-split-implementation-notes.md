@@ -67,6 +67,89 @@ Design doc: `docs/design/2026-07-07-clone-worktree-split.md`
 ### Open questions
 - None.
 
+## Phase 3: Strip clone to flat-only
+
+### Design decisions
+- Deleted `clone/src/{bare,migrate,flatten}.rs` and their `*/tests.rs` outright
+  (`git rm`) — `clone/src/bare.rs`, `clone/src/migrate.rs`, `clone/src/flatten.rs`
+  and their test submodules — Phase 2 already ported the e2e coverage to
+  `worktree/tests/lifecycle_tests.rs` and the unit tests to
+  `worktree/src/{bare,migrate,flatten}/tests.rs`, so clone's copies were
+  confirmed-dead per the doc's copy-in-P2/strip-in-P3 rule; `transport.rs` was
+  already gone (Phase 1), matching the task's note.
+- Collapsed `clone::config::Op` to a single `Clone` variant and removed the
+  `Layout` enum, `resolve_layout`, `run_bare`, `is_flat_clone` — `clone/src/
+  config.rs`, `clone/src/lib.rs::run`/`run_clone` — `run_clone` now always
+  calls `clone_or_update_flat` directly; no dispatch on layout remains.
+- Removed `--bare`/`--migrate`/`--flatten`/`--dry-run` from `Cli`
+  (`clone/src/cli.rs:37-62` per the task's line reference) and every
+  combinability check in `Config::try_from` that referenced them
+  (`--bare`+`--flat`, `--bare`+`--migrate`, `--flatten`+`--migrate`,
+  `--dry-run` validity, etc.) — `clone/src/config.rs::TryFrom<Cli>` — the only
+  remaining validation is "a repospec is required" since `Op::Clone` is now the
+  sole operation.
+- Removed the `default_branch: Option<String>` field from `Config` — it was
+  read via `clone_cfg_value("default")` and consumed only by the deleted
+  `migrate`/`flatten`/`bare` code paths (confirmed via grep before removing);
+  nothing in the flat-clone path (`clone_or_update_flat`/`clone_new_repo`/
+  `update_existing_repo`) ever read it.
+- `--flat` and `--versioning` are UNTOUCHED per the task's explicit
+  instruction — `clone/src/cli.rs` — `--flat` keeps its "retained as a no-op
+  alias" help text.
+- Rewrote `cli.rs`'s `after_help` to drop the `--bare`/`--migrate`/`--flatten`/
+  `clone.cfg default-layout` prose and point users at `worktree init`/
+  `worktree migrate`/`worktree flatten` instead — `clone/src/cli.rs` — so a
+  user who reads `clone --help` after the flags vanish is told where the
+  functionality moved, not left with dangling references to dead flags.
+- Updated `clone/src/shell.rs`'s emitted-script header comment from
+  "smart git clone (bare-worktree layout)" to "smart git clone (flat
+  checkout)" per the task instruction — `clone/src/shell.rs::ZSH`.
+- Rewrote `clone/src/config/tests.rs` from scratch: deleted every
+  `resolve_layout`/`--bare`/`--migrate`/`--flatten`/`--dry-run` combinability
+  test (the fields/flags they exercised no longer exist) and added three
+  tests covering what remains — `test_config_requires_repospec` (error path),
+  `test_config_from_valid_cli_produces_clone_op` (happy path), and
+  `test_config_flat_flag_is_accepted_as_no_op_alias` (confirms `--flat` still
+  parses and behaves as a no-op) — per the "every public function gets a
+  happy-path and an error/edge case" rule.
+- Deleted `clone/tests/lifecycle_tests.rs` outright (the whole file was
+  `--migrate`/`--flatten`/`--bare` e2e coverage, already ported to `worktree/
+  tests/lifecycle_tests.rs` in Phase 2) and replaced `integration_tests.rs`'s
+  single `test_clone_bare_opt_in_layout` with three new tests —
+  `test_clone_bare_flag_is_now_an_unknown_argument`,
+  `test_clone_migrate_flag_is_now_an_unknown_argument`,
+  `test_clone_flatten_flag_is_now_an_unknown_argument` — that directly assert
+  the Phase 3 success criterion (each flag now exits non-zero with an
+  unrecognized-argument error). These do not touch the network (clap rejects
+  the unknown flag before any git invocation), so they run in every
+  environment.
+- Removed the now-fully-unused `tempfile` dev-dependency from `clone/Cargo.toml`
+  (`cargo remove tempfile -p clone --dev`) — it was pulled in only by the
+  deleted `bare`/`migrate`/`flatten` test modules; grep confirmed no remaining
+  `clone` source or test references it after the strip.
+
+### Deviations
+- None. The task's file list said `clone/src/{bare,migrate,flatten,transport}.rs`
+  but `transport.rs` was already deleted in Phase 1 (confirmed absent before
+  starting, consistent with the Phase 1 notes' own documented deviation); this
+  phase simply had nothing left to delete there.
+
+### Tradeoffs
+- Kept `Op` as a single-variant enum (`Op::Clone`) rather than collapsing it
+  away entirely — the task's instruction was scoped to removing
+  `Op::Migrate`/`Op::Flatten`, not the `Op` type itself; keeping the type (even
+  at one variant) is the more surgical, literal reading of the phase and avoids
+  touching `lib.rs::run`'s match-based dispatch shape for a phase explicitly
+  bounded to flag/module removal.
+- Wrote three separate unknown-argument tests (`--bare`/`--migrate`/`--flatten`)
+  instead of one parametrized test — matches this crate's existing
+  one-assertion-per-test style in `integration_tests.rs` and keeps each
+  failure's test name self-diagnosing (a table-driven variant would report
+  a bare "test #2 failed").
+
+### Open questions
+- None.
+
 ## Phase 2: Relocate bare/migrate/flatten into worktree + add verbs
 
 ### Design decisions

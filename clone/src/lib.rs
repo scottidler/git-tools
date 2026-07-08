@@ -1,14 +1,11 @@
 // clone — core logic. The binary (`main.rs`) is a thin shell over `run`.
 
-pub mod bare;
 pub mod cli;
 pub mod config;
-pub mod flatten;
-pub mod migrate;
 pub mod shell;
 
 pub use cli::Cli;
-pub use config::{Config, Layout, Op};
+pub use config::{Config, Op};
 
 use std::path::{Path, PathBuf};
 
@@ -31,76 +28,16 @@ pub fn run(config: Config) -> Result<PathBuf> {
                 .expect("Op::Clone requires a spec (enforced in Config::try_from)");
             run_clone(&config, &spec)
         }
-        Op::Migrate => {
-            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no
-            // spec, migrate the flat checkout the user is standing in (derived
-            // from the enclosing repo's main worktree).
-            let flat = match &config.spec {
-                Some(spec) => config.clonepath.join(spec.to_string()),
-                None => migrate::flat_from_cwd()?,
-            };
-            if config.dry_run {
-                migrate::dry_run(&flat, config.default_branch.as_deref())
-            } else {
-                migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())
-            }
-        }
-        Op::Flatten => {
-            // With a spec, the target is `<clonepath>/<org>/<repo>`; with no
-            // spec, flatten the bare container the user is standing in (derived
-            // from the enclosing container, resolvable even from a linked
-            // worktree or the container root).
-            let container = match &config.spec {
-                Some(spec) => config.clonepath.join(spec.to_string()),
-                None => flatten::container_from_cwd()?,
-            };
-            if config.dry_run {
-                flatten::dry_run(&container, config.default_branch.as_deref())
-            } else {
-                flatten::flatten(&container, config.default_branch.as_deref())
-            }
-        }
     }
 }
 
-/// Clone (or update) `spec`, dispatching on the resolved layout.
+/// Clone (or update) `spec`, always producing a flat checkout.
 fn run_clone(config: &Config, spec: &RepoSpec) -> Result<PathBuf> {
     let repospec = spec.to_string();
-    debug!(
-        "run_clone: repospec={} clonepath={:?} layout={:?}",
-        repospec, config.clonepath, config.layout
-    );
+    debug!("run_clone: repospec={} clonepath={:?}", repospec, config.clonepath);
 
     let target = config.clonepath.join(&repospec);
-
-    match config.layout {
-        Layout::Flat => clone_or_update_flat(config, &repospec, &target),
-        Layout::Bare => run_bare(config, spec, &repospec, &target),
-    }
-}
-
-/// Bare-layout dispatch, handling the mixed-ecosystem cases the default flip
-/// introduces:
-/// - an existing bare container → idempotent reconcile;
-/// - an existing *flat* checkout (not yet migrated) → update it in place and
-///   hint at `--migrate`, never silently convert;
-/// - otherwise → set up a fresh bare container.
-fn run_bare(config: &Config, spec: &RepoSpec, repospec: &str, target: &Path) -> Result<PathBuf> {
-    if bare::is_bare_container(target) {
-        return bare::reconcile_container(config, target);
-    }
-
-    if is_flat_clone(target) {
-        let dest = update_existing_repo(target, &config.revision).map(|_| target.to_path_buf())?;
-        eprintln!(
-            "Note: '{}' is a flat checkout. Run `clone --migrate {}` to convert it to the bare-worktree layout.",
-            target.display(),
-            repospec
-        );
-        return Ok(dest);
-    }
-
-    bare::setup_bare_container(config, spec)
+    clone_or_update_flat(config, &repospec, &target)
 }
 
 /// Flat-layout: update an existing non-empty checkout, else fresh flat clone.
@@ -111,13 +48,6 @@ fn clone_or_update_flat(config: &Config, repospec: &str, target: &Path) -> Resul
     } else {
         clone_new_repo(config, repospec)
     }
-}
-
-/// Whether `path` is a flat checkout (`.git` dir or file) that is *not* a bare
-/// container.
-fn is_flat_clone(path: &Path) -> bool {
-    let git = path.join(".git");
-    (git.is_dir() || git.is_file()) && !bare::is_bare_container(path)
 }
 
 fn update_existing_repo(repo: &Path, revision: &str) -> Result<()> {

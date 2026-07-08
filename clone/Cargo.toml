@@ -9,6 +9,3 @@ clap = { workspace = true }
 common = { workspace = true }
 eyre = { workspace = true }
 log = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3.27.0"

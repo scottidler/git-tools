@@ -148,8 +148,10 @@ fn test_clone_flat_legacy_layout() {
 }
 
 #[test]
-fn test_clone_bare_opt_in_layout() {
-    let temp_dir = create_temp_dir("bare");
+fn test_clone_bare_flag_is_now_an_unknown_argument() {
+    // `--bare` moved to `worktree init`; clone must hard-error on it (no shim),
+    // per the clone/worktree split (design doc Resolved Decisions).
+    let temp_dir = create_temp_dir("bare_removed");
     let binary = get_clone_binary();
 
     let output = Command::new(&binary)
@@ -159,35 +161,65 @@ fn test_clone_bare_opt_in_layout() {
         .output()
         .expect("Failed to execute clone command");
 
+    assert!(
+        !output.status.success(),
+        "clone --bare should exit non-zero now that the flag is removed"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     assert!(
-        output.status.success(),
-        "Bare clone should succeed. Stderr: {}, Stdout: {}",
-        stderr,
-        stdout
+        stderr.contains("unexpected argument") || stderr.contains("unrecognized"),
+        "clone --bare should fail as an unknown argument; got: {}",
+        stderr
     );
 
-    // --bare opts into the container layout: .bare + a .git pointer file, and
-    // the printed destination is the default-branch worktree under it.
-    let container = temp_dir.join("rust-lang/libc");
-    assert!(
-        container.join(".bare").is_dir(),
-        ".bare dir should exist at {:?}",
-        container
-    );
-    assert!(container.join(".git").is_file(), ".git pointer file should exist");
+    fs::remove_dir_all(&temp_dir).ok();
+}
 
-    let printed = stdout.trim();
-    let rel = printed.strip_prefix("./").unwrap_or(printed);
-    let dest = temp_dir.join(rel);
-    assert!(dest.is_dir(), "printed worktree destination should exist: {:?}", dest);
+#[test]
+fn test_clone_migrate_flag_is_now_an_unknown_argument() {
+    let temp_dir = create_temp_dir("migrate_removed");
+    let binary = get_clone_binary();
+
+    let output = Command::new(&binary)
+        .current_dir(&temp_dir)
+        .arg("--migrate")
+        .output()
+        .expect("Failed to execute clone command");
+
     assert!(
-        dest.starts_with(&container),
-        "worktree {:?} should be under the container {:?}",
-        dest,
-        container
+        !output.status.success(),
+        "clone --migrate should exit non-zero now that the flag is removed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("unrecognized"),
+        "clone --migrate should fail as an unknown argument; got: {}",
+        stderr
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_clone_flatten_flag_is_now_an_unknown_argument() {
+    let temp_dir = create_temp_dir("flatten_removed");
+    let binary = get_clone_binary();
+
+    let output = Command::new(&binary)
+        .current_dir(&temp_dir)
+        .arg("--flatten")
+        .output()
+        .expect("Failed to execute clone command");
+
+    assert!(
+        !output.status.success(),
+        "clone --flatten should exit non-zero now that the flag is removed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("unrecognized"),
+        "clone --flatten should fail as an unknown argument; got: {}",
+        stderr
     );
 
     fs::remove_dir_all(&temp_dir).ok();
