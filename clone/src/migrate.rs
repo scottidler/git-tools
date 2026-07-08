@@ -400,7 +400,7 @@ fn remote_default_branch(flat: &Path, fallback: Option<&str>, ssh: Option<&[(&st
 /// override to apply to network ops. `None` means "use ambient SSH".
 fn ssh_env_for_origin(origin: &str) -> Option<Vec<(String, String)>> {
     let org = git::parse_repospec(origin).ok().map(|s| s.org)?;
-    match crate::config::find_ssh_key_for_org(&org) {
+    match common::config::find_ssh_key_for_org(&org) {
         Ok(Some(key)) => Some(vec![("GIT_SSH_COMMAND".to_string(), git::ssh_command(&key))]),
         Ok(None) => None,
         Err(e) => {

@@ -36,7 +36,7 @@ fn spec(org: &str, repo: &str) -> RepoSpec {
 }
 
 /// A `Config` whose "remote" is the local `<root>/origin` directory, so
-/// `transport::clone_with_fallback` clones `<root>/origin/<org>/<repo>`.
+/// `common::transport::clone_with_fallback` clones `<root>/origin/<org>/<repo>`.
 fn fixture_config(root: &Path, org: &str, repo: &str) -> Config {
     Config {
         spec: Some(spec(org, repo)),

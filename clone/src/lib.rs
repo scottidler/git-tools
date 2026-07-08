@@ -6,7 +6,6 @@ pub mod config;
 pub mod flatten;
 pub mod migrate;
 pub mod shell;
-pub mod transport;
 
 pub use cli::Cli;
 pub use config::{Config, Layout, Op};
@@ -18,7 +17,8 @@ use eyre::{Result, WrapErr, eyre};
 use log::debug;
 
 /// Transport URLs tried in order: SSH first, then HTTPS as a fallback.
-pub const REMOTE_URLS: [&str; 2] = ["ssh://git@github.com", "https://github.com"];
+/// Re-exported from `common::transport`, the single home for both binaries.
+pub use common::transport::REMOTE_URLS;
 
 /// Execute the operation described by `config`, returning the destination path
 /// the shell wrapper should `cd` into.
@@ -203,7 +203,7 @@ fn clone_new_repo(config: &Config, repospec: &str) -> Result<PathBuf> {
     };
 
     // Perform the clone (SSH key first, HTTPS fallback).
-    transport::clone_with_fallback(
+    common::transport::clone_with_fallback(
         repospec,
         &full_clone_path,
         &config.remote,
@@ -259,6 +259,3 @@ fn fetch_revision_sha(remote_url: &str, repospec: &str, _verbose: bool) -> Resul
 
     Ok(sha)
 }
-
-#[cfg(test)]
-mod tests;

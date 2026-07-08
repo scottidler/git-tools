@@ -15,7 +15,6 @@ use eyre::{Result, WrapErr, bail};
 use log::{debug, warn};
 
 use crate::config::Config;
-use crate::transport;
 
 // Bare-container primitives shared with `worktree` live in `common::bare`; a
 // bare container also carries a `.git` pointer file, so callers must check
@@ -36,7 +35,7 @@ pub fn setup_bare_container(config: &Config, spec: &RepoSpec) -> Result<PathBuf>
     // 1. bare clone into .bare (SSH key + SSH->HTTPS fallback, as for flat).
     //    On failure, remove the container we just created so a failed clone
     //    never leaves an empty turd directory behind (matches the flat path).
-    if let Err(e) = transport::clone_with_fallback(
+    if let Err(e) = common::transport::clone_with_fallback(
         &repospec,
         &bare,
         &config.remote,
