@@ -4,9 +4,13 @@ A Rust workspace of CLI tools for git repository discovery, analysis, and manage
 
 ## Workspace Structure
 
-- **`common/`** - Shared library with git URL parsing, repo discovery, language detection, and parallel execution
-- **`clone/`** - Clone repos from various spec formats (org/repo, SSH, HTTPS)
-- **`worktree/`** - Switch to / create / list worktrees inside a bare container (the bare-layout navigation tool)
+- **`common/`** - Shared library with git URL parsing, repo discovery, language detection, transport,
+  shared config reading, and parallel execution
+- **`clone/`** - Acquisition only: clone repos from various spec formats (org/repo, SSH, HTTPS), always
+  a flat checkout. Carries no bare-container/layout-conversion code.
+- **`worktree/`** - Owns the entire bare-container lifecycle: `init` (fresh bare acquisition), `migrate`
+  (flat -> bare), `flatten` (bare -> flat), plus the original day-2 switch/list/prune/pick inside an
+  existing container
 - **`ls-git-repos/`** - Recursively discover local git repos with language filtering
 - **`ls-github-repos/`** - List GitHub org/user repos via API with language filtering
 - **`ls-owners/`** - Detect CODEOWNERS files and identify un-owned code paths
@@ -39,7 +43,7 @@ supported way to install the whole workspace locally.
 
 - Releasing is done with `/shipit`: commit → `bump` (patch by default; `0.x.y` synchronized
   across all crates) → push `main` + annotated `vX.Y.Z` tag → `otto install`. The `v*` tag
-  triggers `.github/workflows/binary-release.yml` to build the x86_64 Linux release tarball.
+  triggers `.github/workflows/release.yml` to build the x86_64 Linux release tarball.
 ### 2. Shell functions `clone` / `worktree` → `<bin> shell-init zsh`
 
 The `clone` and `worktree` shell functions are NOT static files and NOT a binary — each
@@ -102,14 +106,18 @@ link to hand-edit.
 - **Tagging**: only via `/shipit`/`bump`, only on `main`, annotated, single flat `v*` tag for the
   whole workspace — never per-crate tags.
 
-## Bare-Worktree Layout (`clone --bare` opt-in)
+## Bare-Worktree Layout (`worktree init` opt-in)
 
-`clone org/repo` produces a **flat checkout** by default. With `--bare` it
-produces a **bare container + nested worktrees** instead — the layout described
-here, an explicit opt-in for the handful of repos where multiple agents work
-branches in parallel. Designs: `docs/design/2026-06-21-clone-bare-worktree.md`
-(the layout) and `docs/design/2026-07-03-clone-flat-default.md` (the flat-default
-flip + `--flatten` collapse).
+`clone org/repo` is acquisition only and always produces a **flat checkout** -
+it carries no bare-container code at all. `worktree init org/repo` is the
+sole entry point into a **bare container + nested worktrees** layout instead
+- an explicit opt-in for the handful of repos where multiple agents work
+branches in parallel. `worktree` also owns converting an existing checkout in
+place (`migrate`/`flatten`) and the original day-2 lifecycle
+(switch/list/prune/pick). Designs: `docs/design/2026-06-21-clone-bare-worktree.md`
+(the layout), `docs/design/2026-07-03-clone-flat-default.md` (the flat-default
+flip + `--flatten` collapse), `docs/design/2026-07-07-clone-worktree-split.md`
+(moving bare/migrate/flatten off `clone` onto `worktree`).
 
 ```
 ~/repos/<org>/<repo>/        # the container (the "logical repo")
@@ -125,21 +133,27 @@ flip + `--flatten` collapse).
   with `mv`; per-worktree links are absolute and need `git worktree repair`.
 - **Mandatory refspec fix (gotcha).** `git clone --bare` leaves
   `remote.origin.fetch` empty, so remote-tracking branches never populate.
-  `clone` sets `+refs/heads/*:refs/remotes/origin/*` and fetches; never skip it.
+  `worktree init`/`migrate` set `+refs/heads/*:refs/remotes/origin/*` and fetch;
+  never skip it.
 - **Persona invariant (security).** Worktrees stay under `~/repos/<org>/`, so the
   `~/.gitconfig` `includeIf "gitdir:~/repos/tatari-tv/"` still fires and commits
   carry the work identity. A worktree placed outside the org prefix silently
   reverts to the home identity - never do it. Locked by a unit test
-  (`clone/src/bare/tests.rs::test_persona_invariant_under_org_prefix`).
+  (`worktree/src/bare/tests.rs::test_persona_invariant_under_org_prefix`).
 - **Commands:**
-  - `clone org/repo` - flat checkout (the default), `cd` into it.
-  - `clone --bare org/repo` - bare container + default worktree, `cd` into it.
+  - `clone org/repo` - flat checkout (the only layout `clone` produces), `cd` into it.
   - `clone --flat org/repo` - redundant no-op alias for the default (`--versioning`
-    implies flat).
-  - Worktree create/switch/list/prune moved OUT of `clone` into the `worktree`
-    tool (`worktree <branch>` / `worktree` picker / `worktree --list` /
-    `worktree --prune`). `clone` no longer has `--worktree`.
-  - `clone --migrate [org/repo]` - convert a flat checkout to bare. With no
+    implies flat). `clone --bare`/`--migrate`/`--flatten` no longer exist - they
+    exit non-zero with an unknown-argument error; use the `worktree` verbs below.
+  - `worktree init org/repo` - fresh bare container + default worktree, `cd` into it.
+    `--clonepath`/`--remote`/`--mirrorpath` override the acquisition inputs
+    (defaults: `.` and `REMOTE_URLS[0]`, mirroring `clone`'s own defaults). Run
+    against an existing bare container, it reconciles in place; run against an
+    existing flat clone, it updates in place and prints a `worktree migrate` hint
+    (never clobbers).
+  - `worktree <branch>` / `worktree` picker / `worktree --list` / `worktree --prune`
+    - unchanged day-2 lifecycle inside an existing bare container.
+  - `worktree migrate [org/repo]` - convert a flat checkout to bare. With no
     repospec, migrates the checkout you're standing in (resolves the enclosing
     repo's main worktree, so it works from a subdirectory or a legacy linked
     worktree). Read-only preflight first (requires `rkvr`, resolves the per-org
@@ -151,7 +165,7 @@ flip + `--flatten` collapse).
     recoverably, repairs worktree links. Bails before mutating on a mid-merge
     tree. Git-ignored files (`.env`) are listed, not carried (recoverable from the
     `rkvr`'d backup); a `target` symlink is noted, not recreated.
-  - `clone --flatten [org/repo]` - the reverse: collapse a bare container back to
+  - `worktree flatten [org/repo]` - the reverse: collapse a bare container back to
     a flat checkout. With no repospec, flattens the container you're standing in.
     Refuse-first - it BLOCKS on any unsafe/unmergeable worktree state (uncommitted
     changes, an unmerged/unpushed local branch, a detached HEAD unreachable from a
@@ -159,19 +173,28 @@ flip + `--flatten` collapse).
     per-worktree config or sparse-checkout, dirty submodules) and on any check that
     cannot be determined (fail-closed). Preserves every `refs/*` at an identical
     OID; archives the whole container via `rkvr` before a copy-then-atomic-swap, so
-    a removed worktree's git-ignored files stay recoverable. `--flatten --dry-run`
-    previews without changing anything.
-- **Existing flat clones** are untouched until `--migrate`d; `clone org/repo` on
-  one updates it in place. A `clone --bare` on an existing flat clone updates it
-  in place and prints a `--migrate` hint (mixed ecosystem is supported).
+    a removed worktree's git-ignored files stay recoverable. `worktree migrate|flatten
+    --dry-run` previews to stderr with empty stdout, so the shell wrapper never `cd`s.
+  - `init`/`migrate`/`flatten` are reserved-word positionals (`argv[1]`),
+    dispatched pre-clap in `worktree/src/main.rs` so clap never mistakes them for
+    the switch-branch positional; `--list`/`--prune`/other `-*` flags still pass
+    straight through with no `cd`.
+- **Existing flat clones** are untouched until `migrate`d; `clone org/repo` on
+  one updates it in place. `worktree init` on an existing flat clone updates it
+  in place and prints a `migrate` hint (mixed ecosystem is supported).
   Discovery (`common::RepoDiscovery`) recognizes both shapes.
-- **`clone.cfg` `[clone] default-layout = bare|flat`** sets the per-machine
-  default (CLI `--bare`/`--flat` overrides it; built-in default is `flat`).
+- **Config** (`common::config`) is YAML-primary at `~/.config/git-tools/git-tools.yml`
+  (`$GIT_TOOLS_CFG` overrides the path), falling back to the legacy INI
+  `~/.config/clone/clone.cfg` (`$CLONE_CFG` overrides that path) when the YAML
+  file is absent. Carries `default-branch` (fallback default branch) and a
+  per-org `orgs.<org>.sshkey` map (`orgs.default` is the catch-all). There is no
+  config-driven layout knob anymore - bare is purely explicit via `worktree init`.
+  Example: `git-tools.yml.example` at the repo root.
 - **No `cd` navigation magic** (the binary-emitted wrappers, see Install & Wiring):
   both wrappers use the
   same contract - the binary prints a destination path to stdout, the shell
   function `cd`s into it. `clone()` does this on a fresh clone; `worktree()` does
-  it for `worktree <branch>` (switch-or-create), while the no-arg list form and
+  it for `worktree <branch>`/`init`/`migrate`/`flatten`, while the no-arg list form and
   any flag pass straight through (no `cd`). The old `chpwd` shim that redirected
   every `cd`/`z`/pushd into a bare container's default worktree was removed: it
   intercepted all navigation and stranded you on the bare root (relative
@@ -180,8 +203,13 @@ flip + `--flatten` collapse).
   navigation lives in the separate `worktree` binary, used like `clone` - NOT a
   `git` alias or `chpwd` hook.
 
-Module map: `clone/src/{cli,config,transport,bare,worktree,migrate}.rs` over a
-thin `main.rs` + testable `lib.rs`.
+Module map: `clone/src/{cli,config,shell}.rs` over a thin `main.rs` + testable
+`lib.rs` - flat-only, no `bare`/`migrate`/`flatten`/`transport` module (those
+moved to `worktree`/`common`). `worktree/src/{cli,config,bare,init,migrate,
+flatten,switch,list,prune,pick,shell}.rs` over `main.rs`/`lib.rs` - owns the
+entire bare-container lifecycle. Shared transport (`common/src/transport.rs`)
+and config reader (`common/src/config.rs`) live in `common`, consumed by both
+binaries; there is no `clone <-> worktree` dependency edge.
 
 ## Key Conventions
 
@@ -204,7 +232,9 @@ thin `main.rs` + testable `lib.rs`.
 ## CI
 
 - **Otto** (`.otto.yml`): lint, check (cargo check + clippy + fmt), test, coverage
-- **GitHub Actions** (`.github/workflows/binary-release.yml`): triggered on `v*` tags, builds x86_64 Linux binaries
+- **GitHub Actions**:
+  - `.github/workflows/ci.yml`: on push/PR to `main`, runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`, and a build matrix (ubuntu + macos)
+  - `.github/workflows/release.yml`: triggered on `v*` tags, builds the x86_64 Linux release tarball
 
 ## Common Crate Modules
 
@@ -216,10 +246,12 @@ thin `main.rs` + testable `lib.rs`.
 - `repo::RepoDiscovery` - find repos under paths (`with_max_depth`, `with_per_worktree`), bare-container aware
 - `language::detect_language(path) -> Option<String>` - three-stage detection (markers, extensions, fallback)
 - `parallel::ParallelExecutor` - rayon-based parallel repo processing
-- `bare::is_bare_container(path)` / `bare::default_branch(container, fallback)` - container detection and default-branch resolution
-- `bare::ref_exists(container, refname) -> bool` - single home for the ref-existence check (used by `clone`, `worktree`, and `prune`; no copies elsewhere)
-- `bare::add_worktree(container, &AddSpec) -> Result<PathBuf>` - the guarded `git worktree add` primitive shared by `clone` and `worktree`; derives the directory from `slugify_branch(branch)`, applies `Collision::ReuseOrBail` (idempotent re-switch) or `Collision::Uniquify` (batch recreation with numeric suffix)
-- `bare::resolve_and_add(container, raw_branch, default_branch) -> Result<PathBuf>` - ref-probing layer used by the `worktree` tool: classifies a raw branch string as local / remote-only / new and calls `add_worktree` with `Collision::ReuseOrBail`; `clone`'s call sites (which already know the source tuple) call `add_worktree` directly
+- `bare::is_bare_container(path)` / `bare::default_branch(container, fallback)` - container detection and default-branch resolution; consumed only by `worktree` (`clone` carries no bare-layout code)
+- `bare::ref_exists(container, refname) -> bool` - single home for the ref-existence check (used across `worktree`'s `bare`/`migrate`/`flatten`/`prune`; no copies elsewhere)
+- `bare::add_worktree(container, &AddSpec) -> Result<PathBuf>` - the guarded `git worktree add` primitive; derives the directory from `slugify_branch(branch)`, applies `Collision::ReuseOrBail` (idempotent re-switch) or `Collision::Uniquify` (batch recreation with numeric suffix)
+- `bare::resolve_and_add(container, raw_branch, default_branch) -> Result<PathBuf>` - ref-probing layer used by `worktree`'s switch-or-create (the bare positional `worktree <branch>`): classifies a raw branch string as local / remote-only / new and calls `add_worktree` with `Collision::ReuseOrBail`
+- `transport::clone_with_fallback` / `transport::try_clone` / `transport::REMOTE_URLS` - the shared acquisition primitives (SSH-first, HTTPS-fallback `git clone`) used by `clone`'s flat path and `worktree init`/`migrate`
+- `config::default_branch() -> Result<Option<String>>` / `config::find_ssh_key_for_org(repospec) -> Result<Option<String>>` - the shared config reader: YAML-primary (`~/.config/git-tools/git-tools.yml`, `$GIT_TOOLS_CFG`), falling back to the legacy INI `clone.cfg` (`$CLONE_CFG`, `~/.config/clone/clone.cfg`) when the YAML file is absent. Fail-closed: the first location whose file exists is THE config for the run - a present-but-malformed file is a loud `Err`, never silently skipped in favor of a lower-precedence file. A missing `default-branch` or an unmatched org is a permissive lookup miss (`None`), not an error.
 
 ## Design Docs
 

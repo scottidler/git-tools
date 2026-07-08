@@ -24,7 +24,7 @@ const SUPPORTED: &[&str] = &["zsh"];
 ///   the script instead of trying to `cd` into it.
 /// - Destination validated (`-z "$dest" || ! -d "$dest"`) before `cd`.
 const ZSH: &str = concat!(
-    "# clone - smart git clone (bare-worktree layout) [shell-init ",
+    "# clone - smart git clone (flat checkout) [shell-init ",
     env!("GIT_DESCRIBE"),
     "]\n",
     "# Install: add to your .zshrc -> if hash clone 2>/dev/null; then eval \"$(command clone shell-init zsh)\"; fi\n",

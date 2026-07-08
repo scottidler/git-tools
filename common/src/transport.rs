@@ -1,12 +1,14 @@
-// clone — git clone transport: SSH-key-first with HTTPS fallback.
+// common — git clone transport: SSH-key-first with HTTPS fallback. Shared by
+// `clone` (flat + bare acquisition) and `worktree` (`init`/`migrate`).
 
 use std::path::Path;
 
-use common::git;
+use crate::git;
 use eyre::{Result, eyre};
 use log::debug;
 
-use crate::REMOTE_URLS;
+/// Transport URLs tried in order: SSH first, then HTTPS as a fallback.
+pub const REMOTE_URLS: [&str; 2] = ["ssh://git@github.com", "https://github.com"];
 
 /// Clone `<remote>/<repospec>` into `target`, trying the primary remote (SSH)
 /// first and falling back to HTTPS. When `ssh_key` is present it drives
@@ -95,3 +97,6 @@ fn try_clone(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

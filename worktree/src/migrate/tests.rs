@@ -3,6 +3,24 @@ use std::collections::HashSet;
 use std::fs;
 use tempfile::TempDir;
 
+/// Test remover: never invokes `rkvr`. `require` always succeeds; `rmrf` removes
+/// via plain `std::fs` (no-op on a missing path). Keeps migrate tests from shelling
+/// out to the real `rkvr` binary or touching its archive.
+struct FsRemover;
+
+impl common::rkvr::Remover for FsRemover {
+    fn require(&self) -> eyre::Result<()> {
+        Ok(())
+    }
+    fn rmrf(&self, path: &Path) -> eyre::Result<()> {
+        match path.symlink_metadata() {
+            Err(_) => Ok(()),
+            Ok(meta) if meta.is_dir() => Ok(fs::remove_dir_all(path)?),
+            Ok(_) => Ok(fs::remove_file(path)?),
+        }
+    }
+}
+
 /// The `wip/*` rescue branches present in a migrated container.
 fn wip_branches(container: &Path) -> Vec<String> {
     let out = git::output(
@@ -77,7 +95,7 @@ fn test_migrate_clean_flat_to_bare() {
     let remote = make_remote(root);
     let flat = make_flat(root, &remote);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
 
     // The flat path is now a bare container with a default-branch worktree.
     assert!(bare::is_bare_container(&flat), "should be a bare container");
@@ -113,7 +131,7 @@ fn test_migrate_rescues_dirty_tree() {
     // Uncommitted change in the main worktree.
     fs::write(flat.join("README.md"), "dirty-xyz").unwrap();
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     assert!(bare::is_bare_container(&flat), "migration should succeed");
@@ -136,7 +154,7 @@ fn test_migrate_rescues_nonempty_stash() {
     fs::write(flat.join("README.md"), "stashed-xyz").unwrap();
     git_run(&flat, &["stash", "push", "-m", "wip"]);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     assert!(bare::is_bare_container(&flat), "migration should succeed");
@@ -159,7 +177,7 @@ fn test_migrate_rescues_dirty_linked_worktree() {
     git_run(&flat, &["worktree", "add", "-b", "side", linked.to_str().unwrap()]);
     fs::write(linked.join("README.md"), "linked-dirty").unwrap();
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     let wips = wip_branches(container);
@@ -187,7 +205,7 @@ fn test_migrate_rescues_detached_worktree() {
         out.stdout.trim().to_string()
     };
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     let wips = wip_branches(container);
@@ -228,10 +246,15 @@ fn test_migrate_bails_on_unmerged_tree() {
     commit(&flat, "main");
     // --no-ff forces the 3-way merge attempt regardless of a `merge.ff=only`
     // git config, so the conflict (and unmerged paths) actually materialize.
-    let merge = git::output(&["merge", "--no-ff", "x"], Some(&flat), None).unwrap();
+    let merge = git::output(
+        &["-c", "user.email=t@e.com", "-c", "user.name=t", "merge", "--no-ff", "x"],
+        Some(&flat),
+        None,
+    )
+    .unwrap();
     assert!(!merge.status.success(), "merge should conflict (test setup)");
 
-    let err = migrate_flat_to_bare(&flat, Some("main")).unwrap_err();
+    let err = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap_err();
     assert!(
         format!("{err}").contains("unmerged"),
         "should bail on unmerged paths; got: {err}"
@@ -278,7 +301,7 @@ fn test_migrate_preserves_clean_but_ahead_commits() {
         out.stdout.trim().to_string()
     };
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
 
     // The unpushed commit must survive into the migrated worktree.
     let head = git::output(&["rev-parse", "HEAD"], Some(&worktree), None).unwrap();
@@ -299,7 +322,7 @@ fn test_migrate_from_non_default_branch_creates_default_worktree() {
     git_run(&flat, &["add", "."]);
     commit(&flat, "feature commit");
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
 
     // The canonical worktree must be the TRUE default (main), not the
     // checked-out feature branch (the Finding 1 bug).
@@ -362,7 +385,7 @@ fn test_flat_from_dir_rejects_bare_container() {
     let root = tmp.path();
     let remote = make_remote(root);
     let flat = make_flat(root, &remote);
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
 
     let err = flat_from_dir(&worktree).unwrap_err();
     assert!(
@@ -389,7 +412,7 @@ fn test_migrate_canonicalizes_target_path() {
     let link = root.join("link-to-repo");
     std::os::unix::fs::symlink(&flat, &link).unwrap();
 
-    let worktree = migrate_flat_to_bare(&link, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&link, Some("main"), &FsRemover).unwrap();
 
     // The container resolves to the REAL path, not the symlink input.
     assert_eq!(
@@ -415,7 +438,7 @@ fn test_migrate_carries_linked_worktree() {
     let linked = root.join("repo-side");
     git_run(&flat, &["worktree", "add", "-b", "side", linked.to_str().unwrap()]);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     // The linked branch is recreated as a native worktree inside the container.
@@ -449,7 +472,7 @@ fn test_migrate_slugifies_slashed_linked_worktree_dir() {
         &["worktree", "add", "-b", "feature/auth", linked.to_str().unwrap()],
     );
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     // The carried worktree lands at the slug dir, not the raw nested path.
@@ -494,7 +517,7 @@ fn test_migrate_slugifies_slashed_default_worktree_dir() {
     fs::create_dir_all(flat.parent().unwrap()).unwrap();
     git_run(root, &["clone", remote.to_str().unwrap(), flat.to_str().unwrap()]);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("release/1.2")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("release/1.2"), &FsRemover).unwrap();
 
     // Migration committed to a bare container, default worktree at the SLUG dir.
     assert!(
@@ -532,7 +555,7 @@ fn test_migrate_skips_linked_worktree_on_default_branch() {
     let linked = root.join("repo-main");
     git_run(&flat, &["worktree", "add", linked.to_str().unwrap(), "main"]);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     assert_eq!(worktree, flat.join("main"), "default worktree must be main");
@@ -564,7 +587,7 @@ fn test_migrate_detects_ignored_files() {
     );
 
     // Ignored files do not block migration (they aren't dirty to git).
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     assert!(worktree.join("README.md").is_file());
 }
 
@@ -580,7 +603,7 @@ fn test_dry_run_makes_no_changes() {
     let linked = root.join("repo-side");
     git_run(&flat, &["worktree", "add", "-b", "side", linked.to_str().unwrap()]);
 
-    let result = dry_run(&flat, Some("main")).unwrap();
+    let result = dry_run(&flat, Some("main"), &FsRemover).unwrap();
 
     // Returns the canonical flat path and changed NOTHING.
     assert_eq!(result, flat.canonicalize().unwrap());
@@ -622,7 +645,7 @@ fn test_migrate_preserves_local_only_branch() {
     // A local-only branch that never existed on origin.
     git_run(&flat, &["branch", "local-only"]);
 
-    let worktree = migrate_flat_to_bare(&flat, Some("main")).unwrap();
+    let worktree = migrate_flat_to_bare(&flat, Some("main"), &FsRemover).unwrap();
     let container = worktree.parent().unwrap();
 
     // The local-only branch must survive in the migrated bare database.

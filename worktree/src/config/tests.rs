@@ -66,3 +66,76 @@ fn test_list_and_prune_are_mutually_exclusive() {
     });
     assert!(res.is_err(), "--list + --prune should be rejected");
 }
+
+// ---- acquisition verbs (init / migrate / flatten) -----------------------
+// (Op, Config, Cli, InitCli/MigrateCli/FlattenCli, RepoSpec all arrive via
+//  `use super::*`; only clap's `Parser` trait needs an explicit import.)
+
+use clap::Parser;
+
+#[test]
+fn test_init_cli_yields_init_op() {
+    let cli = InitCli::try_parse_from(["worktree init", "myorg/myrepo"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(
+        config.op,
+        Op::Init(RepoSpec {
+            org: "myorg".to_string(),
+            repo: "myrepo".to_string(),
+        })
+    );
+    // Defaults mirror clone's bare-acquisition inputs.
+    assert_eq!(config.clonepath, std::path::PathBuf::from("."));
+}
+
+#[test]
+fn test_init_cli_rejects_bad_spec() {
+    let cli = InitCli::try_parse_from(["worktree init", ""]).unwrap();
+    let err = Config::try_from(cli).unwrap_err();
+    assert!(
+        format!("{err}").contains("Failed to parse repository specification"),
+        "an unparseable spec must fail loudly; got: {err}"
+    );
+}
+
+#[test]
+fn test_migrate_cli_with_spec() {
+    let cli = MigrateCli::try_parse_from(["worktree migrate", "org/repo"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(
+        config.op,
+        Op::Migrate(Some(RepoSpec {
+            org: "org".to_string(),
+            repo: "repo".to_string(),
+        }))
+    );
+    assert!(!config.dry_run);
+}
+
+#[test]
+fn test_migrate_cli_without_spec_is_none() {
+    let cli = MigrateCli::try_parse_from(["worktree migrate"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(config.op, Op::Migrate(None));
+}
+
+#[test]
+fn test_flatten_cli_dry_run() {
+    let cli = FlattenCli::try_parse_from(["worktree flatten", "--dry-run", "org/repo"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(
+        config.op,
+        Op::Flatten(Some(RepoSpec {
+            org: "org".to_string(),
+            repo: "repo".to_string(),
+        }))
+    );
+    assert!(config.dry_run, "--dry-run must set dry_run");
+}
+
+#[test]
+fn test_flatten_cli_without_spec_is_none() {
+    let cli = FlattenCli::try_parse_from(["worktree flatten"]).unwrap();
+    let config = Config::try_from(cli).unwrap();
+    assert_eq!(config.op, Op::Flatten(None));
+}

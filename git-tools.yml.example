@@ -1,0 +1,21 @@
+# git-tools shared config — copy to ~/.config/git-tools/git-tools.yml
+# (honors $XDG_CONFIG_HOME; override the path entirely with $GIT_TOOLS_CFG).
+#
+# Read by both `clone` and `worktree` (worktree init/migrate). The legacy
+# `~/.config/clone/clone.cfg` INI format is still read as a fallback when
+# this file is absent, but new setups should use this YAML file.
+
+# Fallback default branch, used only when a remote's default branch can't be
+# detected (e.g. `worktree init`/`migrate` against an unreachable remote).
+# Optional — omit to fall back to the tool's own built-in default.
+default-branch: main
+
+# Per-org SSH key used for transport (git clone/fetch), keyed by GitHub org
+# name. The `default` entry is the catch-all for any org with no explicit
+# entry below. Both `orgs` and every entry under it are optional; an org
+# with no matching key (and no `default`) just clones with ambient SSH.
+orgs:
+  tatari-tv:
+    sshkey: ~/.ssh/tatari
+  default:
+    sshkey: ~/.ssh/id_ed25519

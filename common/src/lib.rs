@@ -1,4 +1,5 @@
 pub mod bare;
+pub mod config;
 pub mod error;
 pub mod git;
 pub mod language;
@@ -7,3 +8,4 @@ pub mod parallel;
 pub mod repo;
 pub mod rkvr;
 pub mod shell;
+pub mod transport;

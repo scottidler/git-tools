@@ -1,4 +1,4 @@
-// clone — `--migrate`: convert a flat checkout into a bare container without
+// worktree — `migrate`: convert a flat checkout into a bare container without
 // losing git-tracked local work.
 //
 // The original tree is never mutated destructively until a verified, recoverable
@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use common::bare::{AddSpec, Collision, Source};
 use common::git;
+use common::rkvr::Remover;
 use eyre::{Result, WrapErr, bail, eyre};
 use log::{debug, warn};
 
@@ -57,10 +58,10 @@ fn flat_from_dir(dir: &Path) -> Result<PathBuf> {
     let out = git::output(&["worktree", "list", "--porcelain"], Some(dir), None)?;
     if !out.status.success() {
         bail!(
-            "not inside a git checkout - run --migrate from within the flat checkout you want to convert, or pass org/repo"
+            "not inside a git checkout - run `worktree migrate` from within the flat checkout you want to convert, or pass org/repo"
         );
     }
-    // A bare repo (clone's already-migrated layout) emits a `bare` line.
+    // A bare repo (the already-migrated layout) emits a `bare` line.
     if out.stdout.lines().any(|l| l.trim() == "bare") {
         bail!("the enclosing repo is already a bare container; nothing to migrate");
     }
@@ -78,9 +79,9 @@ fn flat_from_dir(dir: &Path) -> Result<PathBuf> {
 
 /// Convert the flat checkout at `flat` into a bare container in place,
 /// returning the canonical default-branch worktree path. `default_fallback` is
-/// the `clone.cfg` `[clone] default` used only if the remote advertises no
+/// the config `default` branch used only if the remote advertises no
 /// default branch.
-pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
+pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>, remover: &dyn Remover) -> Result<PathBuf> {
     debug!("migrate_flat_to_bare: flat={:?}", flat);
 
     if !flat.is_dir() || !flat.join(".git").exists() {
@@ -98,7 +99,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     let flat = flat.as_path();
 
     // 1. PREFLIGHT (read-only; any failure here leaves the repo unchanged).
-    common::rkvr::require()?;
+    remover.require()?;
     let origin = origin_url(flat)?;
     let ssh_owned = ssh_env_for_origin(&origin);
     let ssh_borrow: Option<Vec<(&str, &str)>> = ssh_owned
@@ -130,7 +131,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     // 5. Clone the bare container from the LOCAL repo (captures every local ref
     //    at its local state - unpushed commits, local-only branches, wip/*).
     let migrating = sibling(flat, "migrating")?;
-    remove_dir(&migrating)?; // clear any leftover from a failed prior run
+    remove_dir(remover, &migrating)?; // clear any leftover from a failed prior run
     let bare = migrating.join(".bare");
     fs::create_dir_all(&migrating).wrap_err_with(|| format!("creating {}", migrating.display()))?;
 
@@ -139,7 +140,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
         None,
         None,
     ) {
-        let _ = remove_dir(&migrating);
+        let _ = remove_dir(remover, &migrating);
         return Err(e).wrap_err("bare-clone-from-local failed");
     }
 
@@ -202,7 +203,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     verify(&migrating.join(&default_dir), &origin)?;
 
     let backup = sibling(flat, "backup")?;
-    remove_dir(&backup)?;
+    remove_dir(remover, &backup)?;
     fs::rename(flat, &backup).wrap_err_with(|| format!("renaming {} aside", flat.display()))?;
     if let Err(e) = fs::rename(&migrating, flat) {
         // Swap-in failed: restore the original from backup.
@@ -215,7 +216,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     //    step rolls back to the original (backup).
     let final_worktree = flat.join(&default_dir);
     if let Err(e) = repair_worktrees(flat, &worktree_paths).and_then(|()| verify(&final_worktree, &origin)) {
-        let _ = remove_dir(flat);
+        let _ = remove_dir(remover, flat);
         let _ = fs::rename(&backup, flat);
         return Err(e).wrap_err("migrated container failed repair/verification after swap");
     }
@@ -225,7 +226,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
     let mut removed_orphans = Vec::new();
     for dir in &orphan_dirs {
         if dir.exists() && !dir.starts_with(flat) {
-            match remove_dir(dir) {
+            match remove_dir(remover, dir) {
                 Ok(()) => removed_orphans.push(dir.clone()),
                 Err(e) => warn!(
                     "migrate: could not remove orphaned worktree dir {}: {}",
@@ -235,7 +236,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
             }
         }
     }
-    if let Err(e) = remove_dir(&backup) {
+    if let Err(e) = remove_dir(remover, &backup) {
         warn!("migrate: could not remove backup {}: {}", backup.display(), e);
     }
 
@@ -253,7 +254,7 @@ pub fn migrate_flat_to_bare(flat: &Path, default_fallback: Option<&str>) -> Resu
 /// Preview a migration without changing anything: run the read-only preflight,
 /// then print the plan (worktrees, rescues, carry-overs, removals, notes) to
 /// STDERR. Returns the flat path so the wrapper leaves the user at the repo.
-pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
+pub fn dry_run(flat: &Path, default_fallback: Option<&str>, remover: &dyn Remover) -> Result<PathBuf> {
     debug!("dry_run: flat={:?}", flat);
     if !flat.is_dir() || !flat.join(".git").exists() {
         bail!("'{}' is not a git checkout to migrate", flat.display());
@@ -274,7 +275,7 @@ pub fn dry_run(flat: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
     let ssh = ssh_borrow.as_deref();
 
     let reachable = check_connectivity(flat, ssh).is_ok();
-    let rkvr_ok = common::rkvr::require().is_ok();
+    let rkvr_ok = remover.require().is_ok();
     let worktrees = list_worktrees(flat)?;
     let current = current_branch(flat);
     let default = remote_default_branch(flat, default_fallback, ssh);
@@ -385,7 +386,7 @@ fn has_unmerged(path: &Path) -> Result<bool> {
 }
 
 /// The remote's default branch, read-only via `ls-remote --symref` (no mutation),
-/// falling back to the `clone.cfg` default. Used by the dry-run preview.
+/// falling back to the config default. Used by the dry-run preview.
 fn remote_default_branch(flat: &Path, fallback: Option<&str>, ssh: Option<&[(&str, &str)]>) -> Option<String> {
     let out = git::output(&["ls-remote", "--symref", "origin", "HEAD"], Some(flat), ssh).ok()?;
     out.stdout
@@ -400,7 +401,7 @@ fn remote_default_branch(flat: &Path, fallback: Option<&str>, ssh: Option<&[(&st
 /// override to apply to network ops. `None` means "use ambient SSH".
 fn ssh_env_for_origin(origin: &str) -> Option<Vec<(String, String)>> {
     let org = git::parse_repospec(origin).ok().map(|s| s.org)?;
-    match crate::config::find_ssh_key_for_org(&org) {
+    match common::config::find_ssh_key_for_org(&org) {
         Ok(Some(key)) => Some(vec![("GIT_SSH_COMMAND".to_string(), git::ssh_command(&key))]),
         Ok(None) => None,
         Err(e) => {
@@ -459,7 +460,7 @@ fn rescue_work(flat: &Path, worktrees: &[Worktree]) -> Result<Vec<String>> {
         if has_unmerged(&wt.path)? {
             bail!(
                 "refusing to migrate: worktree {} has unmerged paths (mid-merge/rebase). \
-                 Resolve or abort it, then re-run --migrate. Nothing has been changed.",
+                 Resolve or abort it, then re-run `worktree migrate`. Nothing has been changed.",
                 wt.path.display()
             );
         }
@@ -666,7 +667,7 @@ fn print_summary(
 
 /// Determine the REMOTE's default branch (not the local checked-out branch):
 /// populate `origin/HEAD` from the remote, read it, and fall back to the
-/// `clone.cfg` default only if the remote advertises none.
+/// config default only if the remote advertises none.
 fn origin_default_branch(container: &Path, fallback: Option<&str>, ssh: Option<&[(&str, &str)]>) -> Result<String> {
     let _ = git::run(&["remote", "set-head", "origin", "-a"], Some(container), ssh);
     let out = git::output(
@@ -682,7 +683,7 @@ fn origin_default_branch(container: &Path, fallback: Option<&str>, ssh: Option<&
     }
     if let Some(f) = fallback {
         warn!(
-            "migrate: remote advertises no default branch; falling back to clone.cfg default '{}'",
+            "migrate: remote advertises no default branch; falling back to config default '{}'",
             f
         );
         return Ok(f.to_string());
@@ -823,12 +824,12 @@ fn sibling(flat: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(format!("{}.{}", name, suffix)))
 }
 
-/// Remove a directory recoverably via the shared [`common::rkvr::rmrf`]. `rkvr`
-/// presence is enforced by [`common::rkvr::require`] in preflight, so a missing
-/// rkvr here is an error, never a silent non-recoverable delete. A missing path
-/// is a no-op.
-fn remove_dir(path: &Path) -> Result<()> {
-    common::rkvr::rmrf(path)
+/// Remove a directory through the injected [`Remover`]. In production this is
+/// [`common::rkvr::Rkvr`], whose presence is enforced by `require` in preflight, so
+/// a missing rkvr is an error, never a silent non-recoverable delete. A missing
+/// path is a no-op.
+fn remove_dir(remover: &dyn Remover, path: &Path) -> Result<()> {
+    remover.rmrf(path)
 }
 
 #[cfg(test)]

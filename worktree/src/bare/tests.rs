@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::{Layout, Op};
 use common::git::RepoSpec;
 use std::fs;
 use tempfile::TempDir;
@@ -35,21 +34,15 @@ fn spec(org: &str, repo: &str) -> RepoSpec {
     }
 }
 
-/// A `Config` whose "remote" is the local `<root>/origin` directory, so
-/// `transport::clone_with_fallback` clones `<root>/origin/<org>/<repo>`.
-fn fixture_config(root: &Path, org: &str, repo: &str) -> Config {
-    Config {
-        spec: Some(spec(org, repo)),
-        op: Op::Clone,
-        layout: Layout::Bare,
-        revision: "HEAD".to_string(),
-        remote: root.join("origin").to_string_lossy().into_owned(),
+/// `AcquireArgs` whose "remote" is the local `<root>/origin` directory, so
+/// `common::transport::clone_with_fallback` clones `<root>/origin/<org>/<repo>`.
+fn fixture_args(root: &Path) -> AcquireArgs {
+    AcquireArgs {
         clonepath: root.join("work"),
+        remote: root.join("origin").to_string_lossy().into_owned(),
         mirrorpath: None,
-        versioning: false,
-        verbose: false,
-        dry_run: false,
         ssh_key: None,
+        verbose: false,
         default_branch: Some("main".to_string()),
     }
 }
@@ -60,8 +53,8 @@ fn test_setup_bare_container_layout() {
     let root = tmp.path();
     make_source(root, "myorg", "myrepo");
 
-    let config = fixture_config(root, "myorg", "myrepo");
-    let worktree = setup_bare_container(&config, &spec("myorg", "myrepo")).unwrap();
+    let args = fixture_args(root);
+    let worktree = setup_bare_container(&args, &spec("myorg", "myrepo")).unwrap();
 
     let container = root.join("work").join("myorg").join("myrepo");
     assert!(container.join(".bare").is_dir(), ".bare dir should exist");
@@ -80,8 +73,8 @@ fn test_setup_populates_remote_tracking() {
     let root = tmp.path();
     make_source(root, "org", "repo");
 
-    let config = fixture_config(root, "org", "repo");
-    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let args = fixture_args(root);
+    setup_bare_container(&args, &spec("org", "repo")).unwrap();
 
     let container = root.join("work").join("org").join("repo");
     // The refspec fix + fetch must populate origin/*.
@@ -99,8 +92,8 @@ fn test_setup_links_default_branch_upstream() {
     let root = tmp.path();
     make_source(root, "org", "repo");
 
-    let config = fixture_config(root, "org", "repo");
-    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let args = fixture_args(root);
+    setup_bare_container(&args, &spec("org", "repo")).unwrap();
 
     let container = root.join("work").join("org").join("repo");
     // The default branch must track origin/main so `git pull` works in the
@@ -132,8 +125,8 @@ fn test_default_branch_detected() {
     let root = tmp.path();
     make_source(root, "org", "repo");
 
-    let config = fixture_config(root, "org", "repo");
-    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let args = fixture_args(root);
+    setup_bare_container(&args, &spec("org", "repo")).unwrap();
 
     let container = root.join("work").join("org").join("repo");
     assert_eq!(default_branch(&container, None).unwrap(), "main");
@@ -145,17 +138,17 @@ fn test_reconcile_is_idempotent() {
     let root = tmp.path();
     make_source(root, "org", "repo");
 
-    let config = fixture_config(root, "org", "repo");
-    let first = setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let args = fixture_args(root);
+    let first = setup_bare_container(&args, &spec("org", "repo")).unwrap();
 
     // Re-running reconcile must not error and must return the same worktree.
-    let second = reconcile_container(&config, &root.join("work").join("org").join("repo")).unwrap();
+    let second = reconcile_container(&args, &root.join("work").join("org").join("repo")).unwrap();
     assert_eq!(first, second);
     assert!(second.join("README.md").is_file());
 }
 
-/// Legacy-raw-path compatibility (Phase 3): a container created by OLD `clone`
-/// with a slashed branch has its worktree at the RAW nested path
+/// Legacy-raw-path compatibility: a container created by OLD `clone` with a
+/// slashed branch has its worktree at the RAW nested path
 /// (`container/release/1.2`). After the slug-unification the tool derives
 /// `container/release-1-2`, but `add_worktree`'s `ReuseOrBail` must find the
 /// branch via `git worktree list` and reuse the existing RAW path - never attempt
@@ -166,8 +159,8 @@ fn test_add_worktree_reuses_legacy_raw_path() {
     let root = tmp.path();
     make_source(root, "org", "repo");
 
-    let config = fixture_config(root, "org", "repo");
-    setup_bare_container(&config, &spec("org", "repo")).unwrap();
+    let args = fixture_args(root);
+    setup_bare_container(&args, &spec("org", "repo")).unwrap();
     let container = root.join("work").join("org").join("repo");
 
     // Mimic old clone: a branch checked out at the RAW slashed path.
@@ -203,10 +196,10 @@ fn test_persona_invariant_under_org_prefix() {
     let repos = root.join("repos");
     make_source(&repos, "tatari-tv", "svc");
 
-    let mut config = fixture_config(&repos, "tatari-tv", "svc");
+    let mut args = fixture_args(&repos);
     // Clone the container directly under repos/tatari-tv/ (the org prefix).
-    config.clonepath = repos.clone();
-    let worktree = setup_bare_container(&config, &spec("tatari-tv", "svc")).unwrap();
+    args.clonepath = repos.clone();
+    let worktree = setup_bare_container(&args, &spec("tatari-tv", "svc")).unwrap();
 
     // A global gitconfig that swaps in the work identity for anything under
     // repos/tatari-tv/.
