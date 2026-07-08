@@ -43,7 +43,7 @@ supported way to install the whole workspace locally.
 
 - Releasing is done with `/shipit`: commit → `bump` (patch by default; `0.x.y` synchronized
   across all crates) → push `main` + annotated `vX.Y.Z` tag → `otto install`. The `v*` tag
-  triggers `.github/workflows/binary-release.yml` to build the x86_64 Linux release tarball.
+  triggers `.github/workflows/release.yml` to build the x86_64 Linux release tarball.
 ### 2. Shell functions `clone` / `worktree` → `<bin> shell-init zsh`
 
 The `clone` and `worktree` shell functions are NOT static files and NOT a binary — each
@@ -232,7 +232,9 @@ binaries; there is no `clone <-> worktree` dependency edge.
 ## CI
 
 - **Otto** (`.otto.yml`): lint, check (cargo check + clippy + fmt), test, coverage
-- **GitHub Actions** (`.github/workflows/binary-release.yml`): triggered on `v*` tags, builds x86_64 Linux binaries
+- **GitHub Actions**:
+  - `.github/workflows/ci.yml`: on push/PR to `main`, runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`, and a build matrix (ubuntu + macos)
+  - `.github/workflows/release.yml`: triggered on `v*` tags, builds the x86_64 Linux release tarball
 
 ## Common Crate Modules
 
