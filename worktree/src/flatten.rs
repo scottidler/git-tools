@@ -24,6 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::git;
+use common::rkvr::Remover;
 use eyre::{Result, WrapErr, bail, eyre};
 use log::{debug, warn};
 
@@ -87,7 +88,7 @@ fn container_from_dir(dir: &Path) -> Result<PathBuf> {
 /// returning the resulting flat checkout path. `default_fallback` is the
 /// config `default` branch, used only if the container advertises no
 /// default branch. Refuses (before any mutation) on any unsafe worktree state.
-pub fn flatten(container: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
+pub fn flatten(container: &Path, default_fallback: Option<&str>, remover: &dyn Remover) -> Result<PathBuf> {
     debug!("flatten: container={:?}", container);
 
     if !bare::is_bare_container(container) {
@@ -100,7 +101,7 @@ pub fn flatten(container: &Path, default_fallback: Option<&str>) -> Result<PathB
 
     // 1. PREFLIGHT (read-only). rkvr must be present so every removal below is
     //    recoverable; then inspect refuses on any unsafe/unmergeable state.
-    common::rkvr::require()?;
+    remover.require()?;
     let inspection = inspect(container, default_fallback)?;
 
     if !inspection.refusals.is_empty() {
@@ -117,7 +118,7 @@ pub fn flatten(container: &Path, default_fallback: Option<&str>) -> Result<PathB
     report_ignored(&inspection.ignored);
 
     // 2. COPY-BASED CRASH-SAFE TRANSITION (live `.bare` untouched until swap).
-    let flat = perform_transition(container, &inspection.default, &inspection.refs_before)?;
+    let flat = perform_transition(container, &inspection.default, &inspection.refs_before, remover)?;
 
     eprintln!(
         "Flattened '{}' to a single flat checkout on '{}'.",
@@ -135,7 +136,7 @@ pub fn flatten(container: &Path, default_fallback: Option<&str>) -> Result<PathB
 /// Preview a collapse without changing anything: run the read-only inspection and
 /// print the plan (default branch, retained ref count, refusals, ignored files) to
 /// STDERR. Returns the container path so the wrapper leaves the user in place.
-pub fn dry_run(container: &Path, default_fallback: Option<&str>) -> Result<PathBuf> {
+pub fn dry_run(container: &Path, default_fallback: Option<&str>, remover: &dyn Remover) -> Result<PathBuf> {
     debug!("dry_run: container={:?}", container);
 
     if !bare::is_bare_container(container) {
@@ -146,7 +147,7 @@ pub fn dry_run(container: &Path, default_fallback: Option<&str>) -> Result<PathB
         .wrap_err_with(|| format!("resolving absolute path of {}", container.display()))?;
     let container = container.as_path();
 
-    let rkvr_ok = common::rkvr::require().is_ok();
+    let rkvr_ok = remover.require().is_ok();
     let inspection = inspect(container, default_fallback)?;
 
     eprintln!(
@@ -476,7 +477,12 @@ fn report_ignored(ignored: &[(PathBuf, Vec<String>)]) {
 /// Perform the copy-based, crash-safe DB transition (doc steps 1-8). `container`
 /// is canonical and confirmed a bare container; `refs_before` is the pre-transition
 /// retention baseline. Returns the flat checkout path (== `container`) on success.
-fn perform_transition(container: &Path, default: &str, refs_before: &BTreeMap<String, String>) -> Result<PathBuf> {
+fn perform_transition(
+    container: &Path,
+    default: &str,
+    refs_before: &BTreeMap<String, String>,
+    remover: &dyn Remover,
+) -> Result<PathBuf> {
     debug!("perform_transition: container={:?} default={}", container, default);
 
     let staging = sibling(container, "flattening")?;
@@ -484,8 +490,8 @@ fn perform_transition(container: &Path, default: &str, refs_before: &BTreeMap<St
     let staging_git = staging.join(".git");
 
     // Clear any leftovers from a failed prior run (recoverable removals).
-    common::rkvr::rmrf(&staging)?;
-    common::rkvr::rmrf(&backup)?;
+    remover.rmrf(&staging)?;
+    remover.rmrf(&backup)?;
 
     // Step 1: copy the LIVE `.bare/` to `<repo>.flattening/.git/` - never mutate
     // the live container in place.
@@ -513,7 +519,7 @@ fn perform_transition(container: &Path, default: &str, refs_before: &BTreeMap<St
     // Step 3: remove the staged `.git/worktrees/` admin entries. Safe only because
     // preflight refused all non-discardable per-worktree state; stale entries would
     // otherwise make git think branches are checked out elsewhere.
-    common::rkvr::rmrf(&staging_git.join("worktrees"))?;
+    remover.rmrf(&staging_git.join("worktrees"))?;
 
     // Step 4: materialize the flat tree. Pin HEAD to the default branch, then
     // `reset --hard` with an explicit GIT_DIR/GIT_WORK_TREE so the checkout lands
@@ -542,13 +548,13 @@ fn perform_transition(container: &Path, default: &str, refs_before: &BTreeMap<St
     }
     if let Err(e) = verify_flat(container, refs_before) {
         // Step 8: post-swap failure - remove the staged final and restore backup.
-        let _ = common::rkvr::rmrf(container);
+        let _ = remover.rmrf(container);
         let _ = fs::rename(&backup, container);
         return Err(e).wrap_err("flattened checkout failed verification after swap");
     }
 
     // Step 7: only after final verification, remove the backup (recoverably).
-    if let Err(e) = common::rkvr::rmrf(&backup) {
+    if let Err(e) = remover.rmrf(&backup) {
         warn!("flatten: could not remove backup {}: {}", backup.display(), e);
     }
 

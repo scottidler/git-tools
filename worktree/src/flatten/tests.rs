@@ -20,14 +20,22 @@ fn commit(dir: &Path, msg: &str) {
     );
 }
 
-/// Whether `rkvr` is available; the copy-based transition removes via `rkvr rmrf`,
-/// so full-collapse tests are gated on it (refuse/inspection tests are not).
-fn rkvr_available() -> bool {
-    std::process::Command::new("rkvr")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Test remover: never invokes `rkvr`. `require` always succeeds; `rmrf` removes
+/// via plain `std::fs` (no-op on a missing path). Lets the full-collapse tests run
+/// without the real `rkvr` binary and without touching its archive.
+struct FsRemover;
+
+impl common::rkvr::Remover for FsRemover {
+    fn require(&self) -> eyre::Result<()> {
+        Ok(())
+    }
+    fn rmrf(&self, path: &Path) -> eyre::Result<()> {
+        match path.symlink_metadata() {
+            Err(_) => Ok(()),
+            Ok(meta) if meta.is_dir() => Ok(fs::remove_dir_all(path)?),
+            Ok(_) => Ok(fs::remove_file(path)?),
+        }
+    }
 }
 
 /// Build a real bare container at `<root>/work/org/repo` with a `main`-branch
@@ -67,20 +75,17 @@ fn make_container(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 // ----------------------------------------------------------------------------
-// Full collapse (gated on rkvr — the transition removes via `rkvr rmrf`)
+// Full collapse (inject FsRemover — the transition's removals go through the
+// injected Remover, so no `rkvr` binary is needed and its archive is untouched)
 // ----------------------------------------------------------------------------
 
 #[test]
 fn test_flatten_clean_single_main_container() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_clean_single_main_container: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, remote) = make_container(root);
 
-    let flat = flatten(&container, Some("main")).unwrap();
+    let flat = flatten(&container, Some("main"), &FsRemover).unwrap();
 
     assert_eq!(flat, container.canonicalize().unwrap());
     assert!(!bare::is_bare_container(&container), "no more .bare - it is flat now");
@@ -102,10 +107,6 @@ fn test_flatten_clean_single_main_container() {
 
 #[test]
 fn test_flatten_merged_feature_worktree_preserves_all_refs() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_merged_feature_worktree_preserves_all_refs: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
@@ -123,7 +124,7 @@ fn test_flatten_merged_feature_worktree_preserves_all_refs() {
     let before = refs_snapshot(&container).unwrap();
     assert!(before.contains_key("refs/heads/feature"));
 
-    let flat = flatten(&container, Some("main")).unwrap();
+    let flat = flatten(&container, Some("main"), &FsRemover).unwrap();
 
     // Every ref under refs/* survives at an identical OID (the invariant).
     let after = refs_snapshot(&flat).unwrap();
@@ -138,32 +139,24 @@ fn test_flatten_merged_feature_worktree_preserves_all_refs() {
 
 #[test]
 fn test_flatten_staged_db_passes_fsck() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_staged_db_passes_fsck: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
 
     // A successful flatten only commits after verify_flat runs fsck on the staged
     // DB; assert the resulting store is connectivity-clean directly too.
-    let flat = flatten(&container, Some("main")).unwrap();
+    let flat = flatten(&container, Some("main"), &FsRemover).unwrap();
     let fsck = git::output(&["fsck", "--connectivity-only"], Some(&flat), None).unwrap();
     assert!(fsck.status.success(), "flattened store must pass fsck: {}", fsck.stderr);
 }
 
 #[test]
 fn test_flatten_preserves_fetch_refspec() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_preserves_fetch_refspec: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
 
-    let flat = flatten(&container, Some("main")).unwrap();
+    let flat = flatten(&container, Some("main"), &FsRemover).unwrap();
 
     // The non-bare refspec must survive; we must NOT introduce
     // +refs/heads/*:refs/heads/* (it clobbers local branches on the next fetch).
@@ -176,16 +169,12 @@ fn test_flatten_preserves_fetch_refspec() {
 
 #[test]
 fn test_flatten_refuses_dirty_worktree_end_to_end() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_refuses_dirty_worktree_end_to_end: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
     fs::write(container.join("main").join("README.md"), "dirty").unwrap();
 
-    let err = flatten(&container, Some("main")).unwrap_err();
+    let err = flatten(&container, Some("main"), &FsRemover).unwrap_err();
     assert!(
         format!("{err}").contains("uncommitted changes or untracked files"),
         "flatten must refuse a dirty worktree; got: {err}"
@@ -200,10 +189,6 @@ fn test_flatten_refuses_dirty_worktree_end_to_end() {
 
 #[test]
 fn test_flatten_reports_ignored_files_and_still_collapses() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_reports_ignored_files_and_still_collapses: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
@@ -224,7 +209,7 @@ fn test_flatten_reports_ignored_files_and_still_collapses() {
     );
 
     // ...and does NOT block the collapse.
-    let flat = flatten(&container, Some("main")).unwrap();
+    let flat = flatten(&container, Some("main"), &FsRemover).unwrap();
     assert!(
         !bare::is_bare_container(&container),
         "ignored files must not block collapse"
@@ -242,17 +227,13 @@ fn test_flatten_reports_ignored_files_and_still_collapses() {
 /// never moves.
 #[test]
 fn test_flatten_transition_failure_leaves_live_bare_intact() {
-    if !rkvr_available() {
-        eprintln!("SKIP test_flatten_transition_failure_leaves_live_bare_intact: rkvr not available");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let (container, _) = make_container(root);
     let container = container.canonicalize().unwrap();
     let before = refs_snapshot(&container).unwrap();
 
-    let err = perform_transition(&container, "no-such-default-branch", &before).unwrap_err();
+    let err = perform_transition(&container, "no-such-default-branch", &before, &FsRemover).unwrap_err();
     assert!(
         format!("{err:#}").contains("materializing the flat working tree"),
         "the transition must fail while materializing (before any swap); got: {err:#}"
@@ -673,7 +654,7 @@ fn test_dry_run_makes_no_changes() {
     // A refuse condition, to exercise the refusal-reporting path.
     fs::write(container.join("main").join("README.md"), "dirty").unwrap();
 
-    let result = dry_run(&container, Some("main")).unwrap();
+    let result = dry_run(&container, Some("main"), &FsRemover).unwrap();
 
     assert_eq!(result, container.canonicalize().unwrap());
     assert!(bare::is_bare_container(&container), "dry-run must not collapse");

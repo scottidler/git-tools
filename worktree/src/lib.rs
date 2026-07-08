@@ -63,10 +63,10 @@ pub fn run(config: Config) -> Result<Outcome> {
                 None => migrate::flat_from_cwd()?,
             };
             if config.dry_run {
-                let path = migrate::dry_run(&flat, config.default_branch.as_deref())?;
+                let path = migrate::dry_run(&flat, config.default_branch.as_deref(), &common::rkvr::Rkvr)?;
                 return Ok(Outcome::Previewed(path));
             }
-            let path = migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref())?;
+            let path = migrate::migrate_flat_to_bare(&flat, config.default_branch.as_deref(), &common::rkvr::Rkvr)?;
             Ok(Outcome::Switched(path))
         }
         Op::Flatten(spec) => {
@@ -77,10 +77,10 @@ pub fn run(config: Config) -> Result<Outcome> {
                 None => flatten::container_from_cwd()?,
             };
             if config.dry_run {
-                let path = flatten::dry_run(&container, config.default_branch.as_deref())?;
+                let path = flatten::dry_run(&container, config.default_branch.as_deref(), &common::rkvr::Rkvr)?;
                 return Ok(Outcome::Previewed(path));
             }
-            let path = flatten::flatten(&container, config.default_branch.as_deref())?;
+            let path = flatten::flatten(&container, config.default_branch.as_deref(), &common::rkvr::Rkvr)?;
             Ok(Outcome::Switched(path))
         }
         _ => run_local(config),
