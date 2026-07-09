@@ -254,6 +254,23 @@ rc=$?
 check "worktree flatten --dry-run -> wrapper returns non-zero" "1"     "$rc"
 check "worktree flatten --dry-run -> did NOT cd (stayed put)" "$home" "$PWD"
 
+# A `--help`/`-V` AFTER a verb must pass through (no capture, no cd) so the
+# binary's usage/version reaches the user instead of being swallowed by the
+# empty-destination guard. Regression: `worktree init --help` used to hit the
+# capture branch ($1=init) and print "no valid destination; staying in $PWD".
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 worktree init --help >/dev/null 2>&1
+check "worktree init --help -> passthrough, no cd" "$home" "$PWD"
+
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 worktree migrate -V >/dev/null 2>&1
+check "worktree migrate -V -> passthrough, no cd" "$home" "$PWD"
+
+# Same class for clone: a trailing `--help` after a spec must pass through.
+builtin cd "$home"
+STUB_OUT=$dest STUB_RC=0 clone org/repo --help >/dev/null 2>&1
+check "clone <spec> --help -> passthrough, no cd" "$home" "$PWD"
+
 # --- result ------------------------------------------------------------------
 if (( fails )); then
     print -u2 -- "\n$fails test(s) failed"

@@ -19,9 +19,12 @@ const SUPPORTED: &[&str] = &["zsh"];
 ///
 /// Behaviours baked in:
 /// - `command clone` bypasses the same-named function (no `$CLONE` env var).
-/// - `shell-init` is in the passthrough alongside `-h|--help|-v|--version` so
-///   an interactive `clone shell-init zsh` after the function is loaded prints
-///   the script instead of trying to `cd` into it.
+/// - A `-h`/`--help`/`-V`/`--version` flag ANYWHERE in the args passes straight
+///   through (no capture, no `cd`), so `clone <spec> --help` prints usage instead
+///   of being swallowed by the capture branch. A leading help/version flag is
+///   covered too. (The binary uses `-V` for version, not `-v`.)
+/// - `shell-init` passes through so an interactive `clone shell-init zsh` after
+///   the function is loaded prints the script instead of trying to `cd` into it.
 /// - Destination validated (`-z "$dest" || ! -d "$dest"`) before `cd`.
 const ZSH: &str = concat!(
     "# clone - smart git clone (flat checkout) [shell-init ",
@@ -29,7 +32,14 @@ const ZSH: &str = concat!(
     "]\n",
     "# Install: add to your .zshrc -> if hash clone 2>/dev/null; then eval \"$(command clone shell-init zsh)\"; fi\n",
     "clone() {\n",
-    "    if [[ \"$1\" == (-h|--help|-v|--version|shell-init) ]]; then\n",
+    "    local arg\n",
+    "    for arg in \"$@\"; do\n",
+    "        if [[ \"$arg\" == (-h|--help|-V|--version) ]]; then\n",
+    "            command clone \"$@\"\n",
+    "            return $?\n",
+    "        fi\n",
+    "    done\n",
+    "    if [[ \"$1\" == \"shell-init\" ]]; then\n",
     "        command clone \"$@\"\n",
     "    else\n",
     "        local dest\n",

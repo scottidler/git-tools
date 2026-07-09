@@ -19,18 +19,29 @@ const SUPPORTED: &[&str] = &["zsh"];
 ///
 /// Behaviours baked in:
 /// - `command worktree` bypasses the same-named function (no `$WORKTREE` env var).
+/// - A `-h`/`--help`/`-V`/`--version` flag ANYWHERE in the args passes straight
+///   through (no capture, no `cd`), so `worktree init --help` (help after a verb)
+///   prints usage instead of being swallowed by the capture branch's
+///   empty-destination guard. A leading help/version flag is covered too.
 /// - `shell-init` joins the `-*` passthrough case so an interactive
 ///   `worktree shell-init zsh` after the function is loaded prints the script
 ///   instead of trying to `cd` into it.
 /// - Destination validated (`-z "$dest" || ! -d "$dest"`) before `cd`.
-/// - Flags (`-*`) pass straight through so `--list`, `--prune`, etc. reach the
-///   binary without triggering the capture branch.
+/// - Flags (`-*`) as the first token pass straight through so `--list`,
+///   `--prune`, etc. reach the binary without triggering the capture branch.
 const ZSH: &str = concat!(
     "# worktree - switch/create git worktrees in a bare container [shell-init ",
     env!("GIT_DESCRIBE"),
     "]\n",
     "# Install: add to your .zshrc -> if hash worktree 2>/dev/null; then eval \"$(command worktree shell-init zsh)\"; fi\n",
     "worktree() {\n",
+    "    local arg\n",
+    "    for arg in \"$@\"; do\n",
+    "        if [[ \"$arg\" == (-h|--help|-V|--version) ]]; then\n",
+    "            command worktree \"$@\"\n",
+    "            return $?\n",
+    "        fi\n",
+    "    done\n",
     "    case \"$1\" in\n",
     "        -*|shell-init)\n",
     "            command worktree \"$@\"\n",
