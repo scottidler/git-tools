@@ -39,6 +39,48 @@ struct Cli {
 
     #[clap(short, long, num_args = 1..)]
     lang: Vec<String>,
+
+    #[clap(long, value_enum, num_args = 1.., ignore_case = true)]
+    visibility: Vec<Visibility>,
+
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    show_visibility: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
+#[clap(rename_all = "kebab-case")]
+enum Visibility {
+    Public,
+    Internal,
+    Private,
+}
+
+impl fmt::Display for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Visibility::Public => "public",
+                Visibility::Internal => "internal",
+                Visibility::Private => "private",
+            }
+        )
+    }
+}
+
+/// Parse a repo's visibility from the GitHub API JSON.
+/// Prefers the `visibility` field (public/internal/private); falls back to the
+/// older boolean `private` field (public/private only, no internal) for API
+/// responses that omit `visibility`.
+fn parse_visibility(repo: &Value) -> Visibility {
+    match repo["visibility"].as_str() {
+        Some("public") => Visibility::Public,
+        Some("internal") => Visibility::Internal,
+        Some("private") => Visibility::Private,
+        _ if repo["private"].as_bool().unwrap_or(false) => Visibility::Private,
+        _ => Visibility::Public,
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -134,22 +176,31 @@ async fn main() -> Result<()> {
 
     // Filter by language if --lang is specified
     if !args.lang.is_empty() {
-        repo_data.retain(|(_, _, lang)| matches_language(lang.as_deref(), &args.lang));
+        repo_data.retain(|repo| matches_language(repo.language.as_deref(), &args.lang));
+    }
+
+    // Filter by visibility if --visibility is specified
+    if !args.visibility.is_empty() {
+        repo_data.retain(|repo| args.visibility.contains(&repo.visibility));
     }
 
     // Sort based on the provided flag: if --age is set, sort by created_at (oldest first), otherwise sort alphabetically by repo name.
     if args.age {
-        repo_data.sort_by(|a, b| a.1.cmp(&b.1));
+        repo_data.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     } else {
-        repo_data.sort_by(|a, b| a.0.cmp(&b.0));
+        repo_data.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    for (repo_name, created_at, _) in repo_data {
+    for repo in repo_data {
+        let mut columns = Vec::new();
         if args.age {
-            println!("{} {}", created_at, repo_name);
-        } else {
-            println!("{}", repo_name);
+            columns.push(repo.created_at);
         }
+        if args.show_visibility {
+            columns.push(repo.visibility.to_string());
+        }
+        columns.push(repo.name);
+        println!("{}", columns.join(" "));
     }
     Ok(())
 }
@@ -195,12 +246,14 @@ async fn determine_repo_type(name: &str, token: &str) -> Result<RepoType> {
     ))
 }
 
-async fn ls_github_repos(
-    repo_type: RepoType,
-    name: &str,
-    archived: bool,
-    token: &str,
-) -> Result<Vec<(String, String, Option<String>)>> {
+struct Repo {
+    name: String,
+    created_at: String,
+    language: Option<String>,
+    visibility: Visibility,
+}
+
+async fn ls_github_repos(repo_type: RepoType, name: &str, archived: bool, token: &str) -> Result<Vec<Repo>> {
     let client = Client::new();
     let url = repo_type.repo_url(name);
     let mut headers = header::HeaderMap::new();
@@ -246,9 +299,15 @@ async fn ls_github_repos(
             if (archived || !repo["archived"].as_bool().unwrap_or(false))
                 && let (Some(repo_name), Some(created_at)) = (repo["full_name"].as_str(), repo["created_at"].as_str())
             {
-                let date = created_at[..10].to_string();
+                let date = created_at.get(..10).unwrap_or(created_at).to_string();
                 let language = repo["language"].as_str().map(|s| s.to_owned());
-                repo_data.push((repo_name.to_owned(), date, language));
+                let visibility = parse_visibility(&repo);
+                repo_data.push(Repo {
+                    name: repo_name.to_owned(),
+                    created_at: date,
+                    language,
+                    visibility,
+                });
             }
         }
         page += 1;
@@ -256,3 +315,6 @@ async fn ls_github_repos(
 
     Ok(repo_data)
 }
+
+#[cfg(test)]
+mod tests;
